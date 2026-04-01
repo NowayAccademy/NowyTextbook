@@ -95,6 +95,26 @@
     font-style: normal;
   }
 
+  .md-content pre code {
+    background-color: transparent;
+    padding: 0;
+    border-radius: 0;
+    color: inherit;
+    border: none;
+    box-shadow: none;
+  }
+
+  /* prose がインライン code に付ける装飾（バッククォート風）を除去 */
+  .md-content code::before,
+  .md-content code::after {
+    content: none !important;
+  }
+
+  /* blockquote 先頭段落の太字・色が code に継承されないようにする（本文内 code は通常のインラインコード見た目） */
+  .md-content blockquote p code {
+    @apply font-normal bg-slate-100 text-slate-800;
+  }
+
   .md-content h1 + p {
     margin-top: 0;
     color: #6b7280;

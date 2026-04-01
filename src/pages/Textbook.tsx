@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useParams } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
 import Sidebar from "../components/Sidebar";
 
 const courseImageModules = import.meta.glob("../course/**/images/*", {
@@ -54,15 +55,16 @@ const courseLessons: Record<string, { title: string; url: string }[]> = {
   db: [{ title: "1. DBとは", url: "/course/db/lesson1" }],
   java: [
     { title: "1. Java言語とは", url: "/course/java/lesson1" },
-    { title: "2. 式と演算子", url: "/course/java/lesson2" },
-    { title: "3. 条件分岐と繰り返し", url: "/course/java/lesson3" },
-    { title: "4. 配列", url: "/course/java/lesson4" },
-    { title: "5. メソッド", url: "/course/java/lesson5" },
-    { title: "6. クラス", url: "/course/java/lesson6" },
-    { title: "7. オブジェクト指向", url: "/course/java/lesson7" },
-    { title: "8. 継承", url: "/course/java/lesson8" },
-    { title: "9. 多態性", url: "/course/java/lesson9" },
-    { title: "10. カプセル化", url: "/course/java/lesson10" },
+    { title: "2. 変数とは", url: "/course/java/lesson2" },
+    { title: "3. 式と演算子", url: "/course/java/lesson3" },
+    { title: "4. 条件分岐と繰り返し", url: "/course/java/lesson4" },
+    { title: "5. 配列", url: "/course/java/lesson5" },
+    { title: "6. メソッド", url: "/course/java/lesson6" },
+    { title: "7. クラス", url: "/course/java/lesson7" },
+    { title: "8. オブジェクト指向", url: "/course/java/lesson8" },
+    { title: "9. 継承", url: "/course/java/lesson9" },
+    { title: "10. 多態性", url: "/course/java/lesson10" },
+    { title: "11. カプセル化", url: "/course/java/lesson11" },
   ],
 };
 
@@ -72,8 +74,22 @@ const Textbook = () => {
   const [content, setContent] = useState("");
   const course = courseId || "html";
   const target = lessonId || "lesson1";
-  const isJavaLesson1 = course === "java" && target === "lesson1";
-  const lessonLayoutClass = isJavaLesson1 ? "lesson-java-1" : "";
+  const isJavaGoalCardLesson =
+    course === "java" &&
+    [
+      "lesson1",
+      "lesson2",
+      "lesson3",
+      "lesson4",
+      "lesson5",
+      "lesson6",
+      "lesson7",
+      "lesson8",
+      "lesson9",
+      "lesson10",
+      "lesson11",
+    ].includes(target);
+  const lessonLayoutClass = isJavaGoalCardLesson ? "lesson-java-1" : "";
   const currentLessons = courseLessons[course] || [];
   const { intro, sections } = splitMarkdownByH2(content);
   const resolveCourseImage = (src?: string) => {
@@ -96,11 +112,14 @@ const Textbook = () => {
       <Sidebar lessons={currentLessons} />
       <main className="flex-1 overflow-y-auto bg-textbook-bg text-textbook-text px-4 py-5 sm:px-6 sm:py-6 lg:px-8 lg:py-8">
         <div className={`mx-auto w-full max-w-4xl md-content ${lessonLayoutClass}`}>
-          {isJavaLesson1 ? (
+          {isJavaGoalCardLesson ? (
             <>
               {intro && (
                 <div className="lesson-intro mb-6 sm:mb-8">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    rehypePlugins={[rehypeRaw]}
+                  >
                     {intro}
                   </ReactMarkdown>
                 </div>
@@ -114,6 +133,7 @@ const Textbook = () => {
                 >
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
+                    rehypePlugins={[rehypeRaw]}
                     components={{
                       table: ({ children }) => (
                         <div className="my-5 overflow-x-auto rounded-lg border border-slate-200 bg-white">
@@ -137,6 +157,7 @@ const Textbook = () => {
           ) : (
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
+              rehypePlugins={[rehypeRaw]}
               components={{
                 table: ({ children }) => (
                   <div className="my-6 overflow-x-auto rounded-lg border border-slate-200 bg-white">
