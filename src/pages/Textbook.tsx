@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import Sidebar from '../components/Sidebar';
+import remarkGfm from 'remark-gfm';
 
 // Sidebar用のデータ
 const courseLessons: Record<string, { title: string; url: string }[]> = {
@@ -42,8 +43,10 @@ const Textbook = () => {
     <div className="flex flex-1 overflow-hidden">
       <Sidebar lessons={currentLessons} />
       <main className="flex-1 p-8 overflow-y-auto bg-textbook-bg text-textbook-text">
-        <div className="max-w-4xl mx-auto markdown-content">
-          <ReactMarkdown>{content}</ReactMarkdown>
+        <div className="max-w-4xl mx-auto prose markdown-content">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            {content}
+          </ReactMarkdown>
         </div>
       </main>
     </div>
