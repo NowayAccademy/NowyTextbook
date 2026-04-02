@@ -7,7 +7,7 @@ import Textbook from './pages/Textbook';
 function App() {
   return (
     <Router>
-      <div className="min-h-screen bg-main flex flex-col text-text">
+      <div className="h-screen flex flex-col overflow-hidden bg-main text-text">
         <Header />
         <Routes>
           <Route path="/" element={<Home />} />
