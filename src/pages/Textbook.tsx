@@ -180,9 +180,9 @@ const Textbook = () => {
   }, [course, target]);
 
   return (
-    <div className="flex flex-1">
+    <div className="flex min-h-0 min-w-0 flex-1">
       <Sidebar lessons={currentLessons} />
-      <main className="flex-1 overflow-y-auto bg-textbook-bg text-textbook-text px-4 py-5 sm:px-6 sm:py-6 lg:px-8 lg:py-8">
+      <main className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-textbook-bg text-textbook-text px-4 py-5 sm:px-6 sm:py-6 lg:px-8 lg:py-8">
         <div className={`mx-auto w-full max-w-4xl md-content ${lessonLayoutClass}`}>
           {isGoalCardLessonLayout ? (
             <>

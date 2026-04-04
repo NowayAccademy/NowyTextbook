@@ -78,7 +78,7 @@ const courses = [
 
 const Home = () => {
   return (
-    <main className="min-h-screen bg-main text-text p-8">
+    <main className="min-h-0 flex-1 overflow-y-auto bg-main text-text p-8">
       <div className="max-w-5xl mx-auto">
         <h2 className="text-3xl font-bold text-text mb-8 border-l-4 border-accent pl-4">
           コースを選択
