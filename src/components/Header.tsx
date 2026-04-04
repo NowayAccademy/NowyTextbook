@@ -1,11 +1,10 @@
-import React from 'react';
 import { Link } from 'react-router-dom';
 import NOWAYLogo from "../assets/NOWAYLogo.png";
 
 // ヘッダーコンポーネント
 const Header = () => {
   return (
-    <header className="flex items-center p-4 bg-main border-b border-accent">
+    <header className="sticky top-0 z-50 flex items-center p-4 bg-main border-b border-accent">
       <div className="flex items-center gap-3">
         <Link to="/" className="flex items-center gap-3 group">
           <div className="w-15 h-15">

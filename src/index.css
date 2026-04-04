@@ -6,6 +6,234 @@
   --color-accent: #00FFFF;
   --color-text: #E6E6E6;
   --color-card: #1F2833;
-  --color-textbook-bg: #F6F7F8;
+  --color-textbook-bg: #FFFFFF;
   --color-textbook-text: #333132;
+}
+
+@layer components {
+  .md-content {
+    @apply prose prose-slate max-w-none text-[15px] leading-7 sm:text-base sm:leading-8 break-keep;
+    @apply prose-headings:font-semibold prose-headings:text-textbook-text;
+    @apply prose-h1:text-3xl sm:prose-h1:text-4xl prose-h1:mb-2 sm:prose-h1:mb-3;
+    @apply prose-h2:text-xl sm:prose-h2:text-2xl prose-h2:mt-8 sm:prose-h2:mt-10 prose-h2:mb-3 sm:prose-h2:mb-4 prose-h2:pl-3 sm:prose-h2:pl-4 prose-h2:border-l-4 prose-h2:border-l-accent;
+    @apply prose-h3:text-lg sm:prose-h3:text-xl prose-h3:mt-6 sm:prose-h3:mt-8 prose-h3:mb-2 sm:prose-h3:mb-3;
+    @apply prose-p:my-3 sm:prose-p:my-4 prose-p:break-words prose-strong:text-slate-900;
+    @apply prose-ul:my-4 prose-ol:my-4 prose-li:my-1;
+    @apply prose-hr:my-10 prose-hr:border-slate-300;
+    @apply prose-blockquote:rounded-lg prose-blockquote:border prose-blockquote:border-sky-200 prose-blockquote:bg-sky-50 prose-blockquote:px-4 prose-blockquote:py-3 not-italic;
+    @apply prose-code:rounded prose-code:bg-slate-100 prose-code:px-1.5 prose-code:py-0.5 prose-code:text-[0.9em] prose-code:text-slate-800;
+    @apply prose-pre:rounded-lg prose-pre:bg-slate-900 prose-pre:px-4 prose-pre:py-4 prose-pre:text-slate-100;
+    @apply prose-a:text-sky-700 prose-a:underline-offset-2 hover:prose-a:text-sky-800;
+    @apply prose-table:my-6 prose-table:w-full prose-table:border-collapse prose-table:rounded-lg prose-table:overflow-hidden;
+    @apply prose-thead:bg-slate-100;
+    @apply prose-th:border prose-th:border-slate-300 prose-th:px-4 prose-th:py-3 prose-th:text-left prose-th:font-semibold prose-th:text-slate-900;
+    @apply prose-td:border prose-td:border-slate-200 prose-td:px-3 sm:prose-td:px-4 prose-td:py-2.5 sm:prose-td:py-3 prose-td:align-top prose-td:leading-7 prose-td:break-words;
+    @apply prose-tr:even:bg-slate-50;
+  }
+
+  .md-content blockquote p:first-of-type {
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+    font-weight: 700;
+    color: #0c4a6e;
+    letter-spacing: 0.02em;
+  }
+
+  .md-content blockquote p:first-of-type strong {
+    display: inline-block;
+    padding: 0.28rem 0.95rem;
+    border: 1px solid #7dd3fc;
+    background-color: #ffffff;
+    position: relative;
+    clip-path: polygon(
+      6% 2%,
+      16% 0%,
+      28% 3%,
+      40% 0%,
+      52% 2%,
+      64% 0%,
+      76% 3%,
+      88% 0%,
+      96% 4%,
+      100% 16%,
+      97% 28%,
+      100% 40%,
+      98% 52%,
+      100% 64%,
+      97% 76%,
+      100% 88%,
+      96% 96%,
+      88% 100%,
+      76% 97%,
+      64% 100%,
+      52% 98%,
+      40% 100%,
+      28% 97%,
+      16% 100%,
+      6% 98%,
+      0% 88%,
+      3% 76%,
+      0% 64%,
+      2% 52%,
+      0% 40%,
+      3% 28%,
+      0% 16%
+    );
+  }
+
+  .md-content blockquote p:first-of-type::before,
+  .md-content blockquote p:first-of-type::after {
+    content: none;
+  }
+
+  .md-content blockquote p:not(:first-of-type)::before,
+  .md-content blockquote p:not(:first-of-type)::after {
+    content: none;
+  }
+
+  .md-content blockquote {
+    font-style: normal;
+  }
+
+  .md-content pre code {
+    background-color: transparent;
+    padding: 0;
+    border-radius: 0;
+    color: inherit;
+    border: none;
+    box-shadow: none;
+  }
+
+  /* prose がインライン code に付ける装飾（バッククォート風）を除去 */
+  .md-content code::before,
+  .md-content code::after {
+    content: none !important;
+  }
+
+  /* blockquote 先頭段落の太字・色が code に継承されないようにする（本文内 code は通常のインラインコード見た目） */
+  .md-content blockquote p code {
+    @apply font-normal bg-slate-100 text-slate-800;
+  }
+
+  .md-content h1 + p {
+    margin-top: 0;
+    color: #6b7280;
+  }
+
+  .md-content h2:first-of-type {
+    padding-left: 0;
+    border-left: none;
+    padding-bottom: 0.3rem;
+    border-bottom: 4px solid #00ffff;
+  }
+
+  .lesson-java-1.md-content {
+    @apply text-base leading-8;
+  }
+
+  .lesson-java-1 .lesson-section {
+    @apply px-1 py-1 sm:px-0;
+  }
+
+  .lesson-java-1 .lesson-goals {
+    @apply rounded-xl border border-slate-200 bg-sky-50 px-3 py-3 shadow-sm sm:px-4 sm:py-4;
+    padding-top: 1rem;
+  }
+
+  .lesson-java-1 .lesson-goals h2 {
+    margin-top: 0.12rem;
+  }
+
+  .lesson-java-1 h1 {
+    @apply text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl;
+  }
+
+  .lesson-java-1 h1 + p {
+    @apply text-sm font-medium text-slate-500 sm:text-base;
+  }
+
+  .lesson-java-1 h2 {
+    @apply mb-4 border-l-4 border-l-accent pl-4 text-[1.4rem] font-bold text-slate-900 sm:text-[1.55rem];
+  }
+
+  .lesson-java-1 h2:first-of-type {
+    @apply border-l-0 pl-0;
+    padding-bottom: 0.3rem;
+    border-bottom: 4px solid #00ffff;
+  }
+
+  .lesson-java-1 h3 {
+    @apply mt-6 mb-3 text-lg font-semibold text-slate-800 sm:text-xl;
+  }
+
+  .lesson-java-1 p {
+    @apply leading-8 text-slate-700;
+  }
+
+  .lesson-java-1 ul,
+  .lesson-java-1 ol {
+    @apply my-4;
+  }
+
+  .lesson-java-1 .lesson-goals ul {
+    @apply grid gap-2;
+    list-style: none;
+    padding-left: 0;
+  }
+
+  .lesson-java-1 .lesson-goals li {
+    @apply rounded-md border border-sky-200 bg-white px-2.5 py-1.5 font-medium text-slate-700;
+  }
+
+  .lesson-java-1 .lesson-goals li::before {
+    content: "✓ ";
+    color: #0284c7;
+    font-weight: 700;
+  }
+
+  .lesson-java-1 h3 + ol {
+    @apply grid gap-3;
+    list-style: none;
+    counter-reset: step;
+    padding-left: 0;
+  }
+
+  .lesson-java-1 h3 + ol li {
+    @apply rounded-lg border border-slate-200 bg-slate-50 px-4 py-3;
+    counter-increment: step;
+  }
+
+  .lesson-java-1 h3 + ol li::before {
+    content: "STEP " counter(step) " ";
+    @apply mr-2 inline-block rounded bg-sky-100 px-2 py-0.5 text-xs font-bold tracking-wide text-sky-800;
+  }
+
+  .lesson-java-1 img {
+    @apply border-slate-300 bg-white p-2 shadow-sm;
+  }
+
+  .lesson-java-1 img + p {
+    @apply mt-2 text-sm text-slate-500;
+  }
+
+  .lesson-java-1 table {
+    @apply text-sm leading-7;
+  }
+
+  .lesson-java-1 th {
+    @apply sticky top-0 bg-slate-100 text-slate-800;
+  }
+
+  .lesson-java-1 td {
+    @apply align-top text-slate-700;
+  }
+
+  .lesson-java-1 blockquote {
+    @apply border-sky-200 bg-sky-50;
+  }
+
+  .lesson-java-1 blockquote p:first-of-type strong {
+    clip-path: none;
+    @apply rounded border-sky-300 bg-white;
+  }
 }
