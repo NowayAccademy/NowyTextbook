@@ -5,7 +5,7 @@ import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import Sidebar from "../components/Sidebar";
 
-const courseImageModules = import.meta.glob("../course/**/images/*", {
+const courseImageModules = import.meta.glob("../course/**/images/**", {
   eager: true,
   import: "default",
 }) as Record<string, string>;

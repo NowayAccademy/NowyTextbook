@@ -19,6 +19,8 @@
 
 現実世界で例えると：
 
+![変数とは](./images/lesson2/変数とは.png)
+
 | 現実 | プログラム |
 | --- | --- |
 | 名前を書いたメモ帳 | <code>String name = "田中太郎"</code> |
@@ -41,7 +43,8 @@ System.out.println(name + "さん、ありがとうございました！");
 ```
 
 > **ポイント**  
-> 変数はただ「保存する」だけでなく、「意味を持たせる」ためにも使います。<code>100</code> という数字より <code>maxRetryCount = 100</code> と書いた方が、後から読んだときに何の値か一目でわかります。
+> 変数はただ「保存する」だけでなく、「意味を持たせる」ためにも使います。  
+<code>100</code> という数字より <code>maxRetryCount = 100</code> と書いた方が、後から読んだときに何の値か一目でわかります。
 
 ## 2. 変数の宣言と初期化
 
@@ -77,7 +80,7 @@ score = 92;  // 85 → 92 に変わる
 // 同じ型の変数は1行でまとめられる（ただし可読性に注意）
 int x = 10, y = 20, z = 30;
 
-// 個別に書く方が読みやすいことも多い
+// 個別に書く方が読みやすいことのほうが多い
 int x = 10;
 int y = 20;
 int z = 30;
@@ -136,16 +139,13 @@ String value = null;
 >
 > **参照型**：変数の中にはデータの「場所（アドレス）」が入る
 >
-> これが <code>==</code> での比較が String で使えない理由です。
 
 ### どの型を使えばいいか迷ったら？
 
-```
-整数を使いたい   → int（大きければ long）
-小数を使いたい   → double
-文字列を使いたい → String
-true/false      → boolean
-```
+整数を使いたい   → <code>int（大きければ long）</code>  
+小数を使いたい   → <code>double</code>  
+文字列を使いたい → <code>String</code>  
+true/false      → <code>boolean</code> 
 
 ## 4. 変数の命名規則
 
@@ -164,9 +164,11 @@ String my-name = "X";   // ハイフンは使えない
 int class = 10;         // 予約語は使えない
 ```
 
-### 命名スタイル（推奨）
+### 命名スタイル
 
-Javaでは変数に**キャメルケース（camelCase）** を使います。
+Javaでは**用途によって書き方** が違います。
+
+![命名規則](./images/lesson2/命名規則.png)
 
 ```java
 // キャメルケース（変数・メソッド名）
@@ -175,7 +177,7 @@ String firstName = "太郎";
 boolean isEmailVerified = true;
 int totalLoginCount = 0;
 
-// アッパーキャメルケース（クラス名）
+// パスカルケース（クラス名）
 class UserAccount {}
 class EmailService {}
 
@@ -284,7 +286,8 @@ if (retryCount >= MAX_RETRY_COUNT) { }
 ```
 
 > **ポイント**  
-> 「マジックナンバー」（コード中に突然現れる数字）は悪しき慣習です。定数化することで、値の意味が明確になり、変更箇所も一箇所にまとまります。
+> 「マジックナンバー」（コード中に突然現れる数字）は悪しき慣習です。  
+>  定数化することで、値の意味が明確になり、変更箇所も一箇所にまとまります。
 
 ## 7. 型変換（キャスト）
 
@@ -336,80 +339,6 @@ double parsedD = Double.parseDouble("3.14"); // 3.14
 int error = Integer.parseInt("abc"); // NumberFormatException！
 ```
 
-## 8. よくあるミスと対処法
-
-### ① 初期化忘れ
-
-```java
-// よくあるミス
-int count;
-count++;  // エラー！初期化されていない
-
-// 初期化してから使う
-int count = 0;
-count++;
-```
-
-### ② String の比較に == を使う
-
-```java
-String a = "hello";
-String b = "hello";
-
-// == は参照（メモリのアドレス）を比較する
-if (a == b) { }         // 場合によっては false になる
-
-// equals() で中身を比較する
-if (a.equals(b)) { }    // 正しい比較
-
-// null チェックも忘れずに
-if ("hello".equals(userInput)) { }  // userInputがnullでもOK
-```
-
-### ③ 整数同士の割り算
-
-```java
-// 予想と違う結果になる
-int a = 5;
-int b = 2;
-double result = a / b;
-System.out.println(result);  // 2.0（2.5ではない！）
-
-// どちらかをdoubleにする
-double result = (double) a / b;   // 2.5
-double result2 = a / 2.0;         // 2.5
-```
-
-### ④ オーバーフロー
-
-```java
-// int の最大値を超えると予想外の値に
-int max = Integer.MAX_VALUE;  // 2147483647
-int overflow = max + 1;
-System.out.println(overflow);  // -2147483648（マイナスになる！）
-
-// 大きな数はlongを使う
-long safe = (long) max + 1;
-System.out.println(safe);  // 2147483648
-```
-
-### ⑤ NullPointerException
-
-```java
-String name = null;
-
-// nullに対してメソッドを呼ぶとNullPointerException
-System.out.println(name.length());  // エラー！
-
-// nullチェックをしてから使う
-if (name != null) {
-    System.out.println(name.length());
-}
-
-// または三項演算子でデフォルト値を設定
-int length = (name != null) ? name.length() : 0;
-```
-
 ## 9. まとめ
 
 | テーマ | 要点 |
@@ -420,7 +349,6 @@ int length = (name != null) ? name.length() : 0;
 | スコープ | 宣言した <code>{ }</code> の中だけで有効 |
 | 定数 | <code>final</code> をつけると変更不可。マジックナンバーを避ける |
 | 型変換 | 小→大は自動、大→小は明示的キャストが必要 |
-| よくあるミス | 初期化忘れ、<code>==</code>でString比較、整数割り算、null参照 |
 
 > **ポイント**  
 > 変数はプログラミングの「土台」です。最初は型の種類や命名規則を覚えるのが大変かもしれませんが、毎日コードを書くうちに自然と身につきます。焦らず、一歩一歩進めていきましょう！

@@ -194,16 +194,22 @@
   .lesson-java-1 h3 + ol {
     @apply grid gap-3;
     list-style: none;
-    counter-reset: step;
     padding-left: 0;
+  }
+
+  .lesson-java-1 h3 + ol:not(.java-chosen-scenarios) {
+    counter-reset: step;
   }
 
   .lesson-java-1 h3 + ol li {
     @apply rounded-lg border border-slate-200 bg-slate-50 px-4 py-3;
+  }
+
+  .lesson-java-1 h3 + ol:not(.java-chosen-scenarios) li {
     counter-increment: step;
   }
 
-  .lesson-java-1 h3 + ol li::before {
+  .lesson-java-1 h3 + ol:not(.java-chosen-scenarios) li::before {
     content: "STEP " counter(step) " ";
     @apply mr-2 inline-block rounded bg-sky-100 px-2 py-0.5 text-xs font-bold tracking-wide text-sky-800;
   }
