@@ -1,548 +1,537 @@
-# JOIN応用
-FULL OUTER JOIN・CROSS JOIN・複数テーブルのJOIN・自己結合を学びます
+# 集計関数
+COUNT・SUM・AVG・MAX・MINの使い方とNULLの扱いを学びます
 
 ## 本章の目標
 
 本章では以下を目標にして学習します。
 
-- FULL OUTER JOINを使って両テーブルの全行を取得できること
-- CROSS JOINで全組み合わせを生成できること
-- 3テーブル以上を結合したクエリを書けること
-- 自己結合で親子・上司部下のような階層関係を表現できること
-- アンチジョインでどちらかのテーブルにしかないレコードを見つけられること
+- COUNT・SUM・AVG・MAX・MIN の各集計関数を正しく使えること
+- NULL が集計に与える影響を理解し、意図した通りの集計ができること
+- COUNT(*) と COUNT(列名) の違いを説明できること
+- FILTER 句を使って条件付き集計ができること
+- 集計関数が WHERE 句では使えない理由を理解していること
 
 ---
 
-## 1. FULL OUTER JOIN（両テーブルの全行を取得）
+## 1. 集計関数とは
 
-### FULL OUTER JOINとは
+集計関数（Aggregate Function）は、複数の行を1つの値にまとめる関数です。  
+「全商品の合計金額」「平均年齢」「最大値・最小値」などを計算するために使います。
 
-INNER JOINは「両方のテーブルに存在する行」だけを返します。LEFT JOINは「左テーブルの全行 + 右テーブルにマッチした行」を返します。  
-では「**両方のテーブルの全行**」を取得したい場合はどうするか？それが **FULL OUTER JOIN** です。
+以下の `orders` テーブルを例に使います。
 
-イメージとしては「左のテーブルにしかない行も、右のテーブルにしかない行も、すべてひとまとめにして返す」という結合です。マッチしなかった側はNULLで埋められます。
+| id | customer_id | product | amount | status | order_date |
+|----|-------------|---------|--------|--------|------------|
+| 1 | 101 | りんご | 1500 | 完了 | 2024-01-05 |
+| 2 | 102 | バナナ | 800 | 完了 | 2024-01-10 |
+| 3 | 101 | みかん | NULL | キャンセル | 2024-01-15 |
+| 4 | 103 | ぶどう | 3000 | 完了 | 2024-02-03 |
+| 5 | 102 | いちご | 2500 | 完了 | 2024-02-08 |
+| 6 | 104 | メロン | 5000 | 完了 | 2024-02-12 |
+| 7 | 101 | スイカ | 4000 | 完了 | 2024-03-01 |
+
+### 集計関数を使わないクエリ（行ごとにデータを返す）
 
 ```sql
--- テーブル準備
-CREATE TABLE employees (
-    id   INT PRIMARY KEY,
-    name TEXT
-);
-
-CREATE TABLE departments (
-    id          INT PRIMARY KEY,
-    dept_name   TEXT,
-    employee_id INT
-);
-
-INSERT INTO employees VALUES (1, '田中'), (2, '鈴木'), (3, '佐藤');
-INSERT INTO departments VALUES (10, '開発', 1), (20, '営業', 2), (30, '総務', NULL);
-
--- FULL OUTER JOIN
-SELECT
-    e.id        AS emp_id,
-    e.name      AS emp_name,
-    d.dept_name
-FROM employees e
-FULL OUTER JOIN departments d ON e.id = d.employee_id;
+SELECT id, customer_id, amount FROM orders;
+-- 7行返ってくる
 ```
 
-**結果イメージ**
+### 集計関数を使ったクエリ（全行を1行に集約する）
 
-| emp_id | emp_name | dept_name |
-|--------|----------|-----------|
-| 1      | 田中     | 開発      |
-| 2      | 鈴木     | 営業      |
-| 3      | 佐藤     | NULL      |
-| NULL   | NULL     | 総務      |
+```sql
+SELECT SUM(amount) AS total_amount FROM orders;
+-- 1行だけ返ってくる
+```
 
 > **ポイント**  
-> FULL OUTER JOINでは「どちらか一方にしかない行」がNULLを含んで返ります。佐藤は部署に割り当てられておらず、総務は担当社員がいないことが一目でわかります。
+> 集計関数は複数の行を1行に「圧縮」します。  
+> GROUP BY を使わない場合は、テーブル全体が1つのグループとして扱われます。
 
 ---
 
-## 2. FULL OUTER JOINの使い所（差分確認）
+## 2. COUNT(*) vs COUNT(列名)
 
-### データの差分チェックに使う
-
-FULL OUTER JOINの最も実用的な使い方は、**2つのテーブル間の差分を確認する**ことです。例えば「マスタテーブルと実績テーブルを比べて、どちらかにしか存在しないレコードを見つける」といった場面で活躍します。
+### COUNT(*) — すべての行数をカウント
 
 ```sql
--- 左テーブルにしかない行（部署に割り当てられていない社員）を取得
-SELECT e.id, e.name
-FROM employees e
-FULL OUTER JOIN departments d ON e.id = d.employee_id
-WHERE d.employee_id IS NULL AND e.id IS NOT NULL;
-
--- 右テーブルにしかない行（担当社員のいない部署）を取得
-SELECT d.dept_name
-FROM employees e
-FULL OUTER JOIN departments d ON e.id = d.employee_id
-WHERE e.id IS NULL AND d.id IS NOT NULL;
+-- NULL を含む全行をカウント
+SELECT COUNT(*) AS total_rows FROM orders;
+-- 結果: 7
 ```
 
-### 実際のユースケース
+`COUNT(*)` はテーブルの全行数を返します。NULL の有無に関係なくカウントします。
 
-- 本番DB と バックアップDB の差分チェック
-- 古い顧客マスタと新しい顧客マスタの突き合わせ
-- 注文テーブルと請求テーブルの未消込チェック
-
-> **ポイント**  
-> FULL OUTER JOINは「どちらかにしか存在しない行」を浮かび上がらせるのに便利です。WHERE句でNULL判定を組み合わせることで、片側のみのレコードを絞り込めます。
-
----
-
-## 3. CROSS JOIN（直積、全組み合わせ）
-
-### CROSS JOINとは
-
-CROSS JOINは「テーブルAの全行」×「テーブルBの全行」のすべての組み合わせを返します。数学でいう「直積（デカルト積）」です。
-
-ON句や結合条件を書かない点が他のJOINと大きく異なります。
+### COUNT(列名) — 指定した列が NULL でない行数をカウント
 
 ```sql
--- 色テーブル
-CREATE TABLE colors (color TEXT);
-INSERT INTO colors VALUES ('赤'), ('青'), ('緑');
+-- amountがNULLでない行数をカウント
+SELECT COUNT(amount) AS non_null_amount FROM orders;
+-- 結果: 6（id=3 の amount が NULL なのでカウントされない）
+```
 
--- サイズテーブル
-CREATE TABLE sizes (size TEXT);
-INSERT INTO sizes VALUES ('S'), ('M'), ('L');
+`COUNT(列名)` は NULL を除いてカウントします。
 
--- CROSS JOINで全組み合わせを生成
+### 比較の例
+
+```sql
 SELECT
-    c.color,
-    s.size
-FROM colors c
-CROSS JOIN sizes s;
+    COUNT(*)      AS 全行数,              -- 7
+    COUNT(amount) AS amount非NULL件数     -- 6
+FROM orders;
 ```
 
-**結果（3 × 3 = 9行）**
-
-| color | size |
-|-------|------|
-| 赤    | S    |
-| 赤    | M    |
-| 赤    | L    |
-| 青    | S    |
-| 青    | M    |
-| 青    | L    |
-| 緑    | S    |
-| 緑    | M    |
-| 緑    | L    |
+| 全行数 | amount非NULL件数 |
+|--------|----------------|
+| 7 | 6 |
 
 > **注意**  
-> テーブルが大きい場合、CROSS JOINの結果行数は「行数A × 行数B」になります。1万行 × 1万行 = 1億行になるため、意図せず実行すると大変なことになります。使う際は必ず件数を確認してから実行しましょう。
+> テーブルの全件数を取得したい場合は `COUNT(*)` を使いましょう。  
+> `COUNT(id)` でも同じ結果になることが多いですが、  
+> 意図が明確な `COUNT(*)` の方が好まれます。
+
+---
+
+## 3. SUM / AVG / MAX / MIN の基本
+
+### SUM — 合計
+
+```sql
+-- 全注文の合計金額
+SELECT SUM(amount) AS total_amount FROM orders;
+-- 結果: 16800 (NULL は無視される)
+```
+
+### AVG — 平均
+
+```sql
+-- 全注文の平均金額
+SELECT AVG(amount) AS avg_amount FROM orders;
+-- 結果: 2800 (16800 ÷ 6件、NULLの1件は除外)
+```
+
+### MAX — 最大値
+
+```sql
+-- 最も高い注文金額
+SELECT MAX(amount) AS max_amount FROM orders;
+-- 結果: 5000
+
+-- 最新の注文日
+SELECT MAX(order_date) AS latest_order FROM orders;
+-- 結果: 2024-03-01
+```
+
+### MIN — 最小値
+
+```sql
+-- 最も安い注文金額
+SELECT MIN(amount) AS min_amount FROM orders;
+-- 結果: 800
+
+-- 最も古い注文日
+SELECT MIN(order_date) AS oldest_order FROM orders;
+-- 結果: 2024-01-05
+```
+
+### まとめて使う
+
+```sql
+SELECT
+    COUNT(*)      AS 注文件数,
+    SUM(amount)   AS 合計金額,
+    AVG(amount)   AS 平均金額,
+    MAX(amount)   AS 最高金額,
+    MIN(amount)   AS 最低金額
+FROM orders;
+```
+
+---
+
+## 4. NULL が集計に与える影響
+
+集計関数は NULL を無視します。
+
+```sql
+-- サンプルデータ: amount は (1500, 800, NULL, 3000, 2500, 5000, 4000)
+
+SELECT COUNT(*)      FROM orders;  -- 7（NULLも含む）
+SELECT COUNT(amount) FROM orders;  -- 6（NULLを除く）
+SELECT SUM(amount)   FROM orders;  -- 16800（NULLを除いた合計）
+SELECT AVG(amount)   FROM orders;  -- 2800（16800 ÷ 6、NULLを除いた平均）
+SELECT MAX(amount)   FROM orders;  -- 5000
+SELECT MIN(amount)   FROM orders;  -- 800
+```
+
+### AVG の NULL 除外に注意
+
+AVG の分母は「NULL でない行数」です。これが意図と合わない場合は修正が必要です。
+
+```sql
+-- 実際の AVG（NULLを除いた平均）：16800 ÷ 6 = 2800
+SELECT AVG(amount) FROM orders;
+
+-- NULL を 0 として計算した平均：16800 ÷ 7 = 2400
+SELECT AVG(COALESCE(amount, 0)) FROM orders;
+```
+
+どちらが正しいかはビジネス要件によります。  
+「キャンセルされた注文は0円として平均を計算してほしい」なら後者です。
+
+> **注意**  
+> NULL を除いた AVG が正しいのか、NULL を 0 として計算した AVG が正しいのかは  
+> 要件を確認しましょう。黙って NULL を無視すると集計の意味が変わることがあります。
 
 > **現場メモ**  
-> CROSS JOINを意図せず発生させてしまう「古いSQL記法」に注意が必要です。`FROM table_a, table_b WHERE a.id = b.id` という書き方はCROSS JOINと等価で、WHERE句の条件をうっかり外すと全行の組み合わせが返ります。筆者がレガシーコードを保守していたとき、開発者がWHERE句を誤って削除してしまい、数万行 × 数万行のカーテシアン積が発生してDBに高負荷がかかった経験があります。現在は `INNER JOIN ... ON ...` と明示的に書くスタイルが標準です。古い記法を見かけたら、レビューで現代的な書き方へのリライトを提案することをお勧めします。
+> 月次レポートで「平均購入金額」を算出していたところ、あるキャンペーン後から数値が急に上振れしました。調べると、キャンペーンでキャンセル注文が増えて `amount` がNULLになった行が多数発生していました。`AVG(amount)` はNULLを除外するため、分母（注文件数）が実態より少なく計算されていました。本来は「キャンセル分も含めた平均」を求めたかったので、`AVG(COALESCE(amount, 0))` に修正しました。集計クエリを書く前には「NULLの行をどう扱うか」を必ずステークホルダーに確認する習慣が必要です。
 
 ---
 
-## 4. CROSS JOINの使い所（カレンダー生成等）
+## 5. COUNT(DISTINCT 列名)
 
-### カレンダーの生成
-
-CROSS JOINは「すべての組み合わせが欲しい」場面で重宝します。代表的なのがカレンダーの生成です。
+`DISTINCT` を `COUNT` の中に使うと、重複を排除した件数を取得できます。
 
 ```sql
--- 月のテーブルを生成してCROSS JOINでカレンダーを作る
-WITH months AS (
-    SELECT generate_series(1, 12) AS month
-),
-days AS (
-    SELECT generate_series(1, 31) AS day
-)
-SELECT month, day
-FROM months
-CROSS JOIN days
-ORDER BY month, day
-LIMIT 30; -- 確認用に30行だけ表示
+-- 注文した顧客の数（重複なし）
+SELECT COUNT(DISTINCT customer_id) AS unique_customers FROM orders;
+-- 結果: 4（customer_id: 101, 102, 103, 104）
+-- COUNT(*) なら 7
+
+-- 購入された商品の種類数
+SELECT COUNT(DISTINCT product) AS unique_products FROM orders;
+-- 結果: 7（全商品が異なる）
 ```
 
-### 商品と倉庫の在庫マスタ生成
+### COUNT(*) との比較
 
 ```sql
--- 全商品 × 全倉庫の組み合わせで在庫マスタの雛形を作る
-CREATE TABLE products (product_id INT, product_name TEXT);
-CREATE TABLE warehouses (warehouse_id INT, location TEXT);
-
-INSERT INTO products VALUES (1, 'りんご'), (2, 'みかん'), (3, 'ぶどう');
-INSERT INTO warehouses VALUES (101, '東京倉庫'), (102, '大阪倉庫');
-
 SELECT
-    p.product_id,
-    p.product_name,
-    w.warehouse_id,
-    w.location,
-    0 AS stock_count  -- 初期在庫は0
-FROM products p
-CROSS JOIN warehouses w
-ORDER BY p.product_id, w.warehouse_id;
+    COUNT(*)                    AS 全注文件数,     -- 7
+    COUNT(DISTINCT customer_id) AS ユニーク顧客数  -- 4
+FROM orders;
 ```
 
 > **ポイント**  
-> CROSS JOINは「マスタデータとマスタデータを掛け合わせて初期データを作る」用途でよく使われます。ゲームのキャラクター × 装備の組み合わせ一覧、時間帯 × 曜日のシフト雛形なども同様です。
+> 「何人のユーザーがアクセスしたか」「何種類の商品が売れたか」のような  
+> 「ユニーク件数」を数えたい場合に `COUNT(DISTINCT 列名)` を使います。
 
 ---
 
-## 5. 3テーブル以上のJOIN（順序と可読性）
+## 6. 複数の集計を1つのクエリで
 
-### 複数テーブルのJOIN
-
-実務では3つ以上のテーブルを結合することが頻繁にあります。JOINは左から順番に処理されていくイメージです。
+1つの SELECT 文で複数の集計結果を取得できます。
 
 ```sql
--- テーブル準備
-CREATE TABLE orders (
-    order_id    INT PRIMARY KEY,
-    customer_id INT,
-    product_id  INT,
-    quantity    INT
-);
-
-CREATE TABLE customers (
-    customer_id INT PRIMARY KEY,
-    customer_name TEXT
-);
-
-CREATE TABLE products_master (
-    product_id   INT PRIMARY KEY,
-    product_name TEXT,
-    price        INT
-);
-
-INSERT INTO customers VALUES (1, '山田商店'), (2, '鈴木ショップ');
-INSERT INTO products_master VALUES (10, 'りんご', 150), (20, 'みかん', 100);
-INSERT INTO orders VALUES (1, 1, 10, 5), (2, 1, 20, 3), (3, 2, 10, 2);
-
--- 3テーブルを結合して注文一覧を取得
 SELECT
-    o.order_id,
-    c.customer_name,
-    p.product_name,
-    o.quantity,
-    p.price * o.quantity AS total_price
-FROM orders o
-INNER JOIN customers c         ON o.customer_id = c.customer_id
-INNER JOIN products_master p   ON o.product_id  = p.product_id
-ORDER BY o.order_id;
+    COUNT(*)                    AS 総注文数,
+    COUNT(amount)               AS 金額が入力された注文数,
+    COUNT(DISTINCT customer_id) AS 注文した顧客数,
+    SUM(amount)                 AS 総売上,
+    ROUND(AVG(amount), 0)       AS 平均注文金額,
+    MAX(amount)                 AS 最高注文金額,
+    MIN(amount)                 AS 最低注文金額,
+    MAX(order_date)             AS 最新注文日,
+    MIN(order_date)             AS 最古注文日
+FROM orders;
 ```
 
-### 可読性のためのコツ
+このように1クエリで必要な集計値をまとめて取得できます。
+
+---
+
+## 7. WHERE と組み合わせた集計
+
+`WHERE` で行を絞り込んでから集計できます。
 
 ```sql
--- 長くなる場合はCTEを使うと読みやすい（詳細はlesson11参照）
-WITH order_details AS (
-    SELECT
-        o.order_id,
-        o.customer_id,
-        o.product_id,
-        o.quantity
-    FROM orders o
-)
+-- 「完了」ステータスの注文のみ集計
 SELECT
-    od.order_id,
-    c.customer_name,
-    p.product_name,
-    od.quantity,
-    p.price * od.quantity AS total_price
-FROM order_details od
-INNER JOIN customers c         ON od.customer_id = c.customer_id
-INNER JOIN products_master p   ON od.product_id  = p.product_id;
+    COUNT(*) AS 完了注文数,
+    SUM(amount) AS 完了注文合計
+FROM orders
+WHERE status = '完了';
+
+-- 2024年2月の注文のみ集計
+SELECT
+    COUNT(*) AS 2月注文数,
+    SUM(amount) AS 2月合計
+FROM orders
+WHERE order_date >= '2024-02-01'
+  AND order_date < '2024-03-01';
+
+-- 特定の顧客の集計
+SELECT
+    COUNT(*) AS 注文回数,
+    SUM(amount) AS 合計購入額
+FROM orders
+WHERE customer_id = 101;
 ```
 
 > **ポイント**  
-> JOINを重ねるときは「どのテーブルが中心か」を意識してください。中心テーブル（ここではorders）をFROMに置き、そこから関連テーブルをJOINしていくと論理的に読みやすくなります。
-
-> **現場メモ**  
-> 実務では4〜5テーブルを結合するクエリも珍しくありませんが、JOINが3つを超えたあたりからコードの見通しが急激に悪くなります。そのタイミングで「CTEに分割できないか」を検討することをお勧めします。筆者が経験したケースでは、5テーブルJOINのクエリが「なぜこの結果になるのか誰もわからない」状態になっていて、CTEに分割したところバグが2つ見つかったことがありました。またPostgreSQLのプランナーはJOINの順序を最適化しますが、複雑すぎると最適化に失敗して遅いプランを選ぶことがあります。EXPLAINで確認しながら、必要に応じてCTEを使って中間結果を明示的に作るとパフォーマンスが改善することがあります。
+> WHERE は集計前にフィルタリングします。集計対象の行を限定したい場合は  
+> WHERE を使います。集計後にフィルタリングしたい場合は HAVING を使います（次章）。
 
 ---
 
-## 6. 自己結合（同じテーブルを2回JOINする）
+## 8. 集計関数は WHERE には使えない（HAVING が必要な理由）
 
-### 自己結合とは
-
-**自己結合**とは、同じテーブルを「2つの別テーブルのように見なして」結合する手法です。必ずエイリアス（別名）を付けることで区別します。
+集計関数（SUM, COUNT など）を WHERE 句に書くとエラーになります。
 
 ```sql
--- 社員テーブル（manager_idは上司の社員IDを指す）
-CREATE TABLE staff (
-    id         INT PRIMARY KEY,
-    name       TEXT,
-    manager_id INT  -- NULLの場合は最上位
-);
-
-INSERT INTO staff VALUES
-    (1, '社長',   NULL),
-    (2, '部長A',  1),
-    (3, '部長B',  1),
-    (4, '課長C',  2),
-    (5, '課長D',  2),
-    (6, '一般E',  4);
-
--- 社員とその上司名を取得する自己結合
-SELECT
-    e.id        AS emp_id,
-    e.name      AS emp_name,
-    m.name      AS manager_name
-FROM staff e
-LEFT JOIN staff m ON e.manager_id = m.id
-ORDER BY e.id;
+-- エラー：WHERE には集計関数を使えない
+SELECT customer_id, SUM(amount) AS total
+FROM orders
+WHERE SUM(amount) > 5000;  -- ERROR: aggregate functions are not allowed in WHERE
 ```
 
-**結果**
+なぜ使えないのかというと、SQLの実行順序に理由があります。
 
-| emp_id | emp_name | manager_name |
-|--------|----------|--------------|
-| 1      | 社長     | NULL         |
-| 2      | 部長A    | 社長         |
-| 3      | 部長B    | 社長         |
-| 4      | 課長C    | 部長A        |
-| 5      | 課長D    | 部長A        |
-| 6      | 一般E    | 課長C        |
-
-> **ポイント**  
-> 自己結合では必ず別々のエイリアス（e, mなど）を付けてください。同じテーブルを「社員として」と「上司として」の2役で使うイメージです。
-
----
-
-## 7. 自己結合の使い所（親子関係、上司・部下）
-
-### カテゴリの親子関係
-
-```sql
--- カテゴリテーブル（parent_idで親カテゴリを参照）
-CREATE TABLE categories (
-    id        INT PRIMARY KEY,
-    name      TEXT,
-    parent_id INT
-);
-
-INSERT INTO categories VALUES
-    (1, '食品',     NULL),
-    (2, '野菜',     1),
-    (3, '果物',     1),
-    (4, 'にんじん', 2),
-    (5, 'りんご',   3);
-
--- 各カテゴリとその親カテゴリ名を取得
-SELECT
-    c.name       AS category,
-    p.name       AS parent_category
-FROM categories c
-LEFT JOIN categories p ON c.parent_id = p.id
-ORDER BY c.id;
+```
+実行順序：
+1. FROM    → テーブルを読む
+2. WHERE   → 行を絞り込む（この時点ではまだ集計されていない）
+3. GROUP BY → グループ化する
+4. 集計関数 → 集計する
+5. HAVING  → グループに条件をつける（集計後なのでここで使える）
+6. SELECT  → 返す列を決める
+7. ORDER BY → 並べ替える
+8. LIMIT   → 件数を制限する
 ```
 
-### 同じ部署の社員を横に並べる
+WHERE が実行される時点では、まだ集計が行われていません。  
+集計後の値に条件を付けたい場合は HAVING を使います（次章で詳しく学びます）。
 
 ```sql
--- 同じ部署に所属する社員のペアを取得（重複排除）
-SELECT
-    a.name AS employee_a,
-    b.name AS employee_b
-FROM staff a
-INNER JOIN staff b ON a.manager_id = b.manager_id
-WHERE a.id < b.id  -- 重複ペアを防ぐ（A,BとB,Aが両方出ないように）
-ORDER BY a.name;
-```
-
-> **ポイント**  
-> 自己結合で「同じグループ内の組み合わせ」を作る場合、`a.id < b.id` のような条件で重複ペアを防ぐのが定石です。
-
----
-
-## 8. アンチジョイン（LEFT JOIN + WHERE IS NULL）
-
-### アンチジョインとは
-
-アンチジョインは「**テーブルAにあってテーブルBにはない**レコードを取得する」手法です。「まだ注文していない顧客」「商品が割り当てられていない社員」などを見つけるのに使います。
-
-```sql
--- 注文履歴のない顧客を取得するアンチジョイン
-SELECT
-    c.customer_id,
-    c.customer_name
-FROM customers c
-LEFT JOIN orders o ON c.customer_id = o.customer_id
-WHERE o.order_id IS NULL;  -- JOINしてもマッチしなかった行
-```
-
-### NOT INを使った書き方との比較
-
-```sql
--- NOT IN を使う方法（NULLに注意）
-SELECT customer_id, customer_name
-FROM customers
-WHERE customer_id NOT IN (
-    SELECT customer_id FROM orders
-);
-
--- NOT EXISTS を使う方法
-SELECT c.customer_id, c.customer_name
-FROM customers c
-WHERE NOT EXISTS (
-    SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id
-);
+-- 正しい：集計後にフィルタリングするには HAVING を使う
+SELECT customer_id, SUM(amount) AS total
+FROM orders
+GROUP BY customer_id
+HAVING SUM(amount) > 5000;
 ```
 
 > **注意**  
-> `NOT IN` はサブクエリ内にNULLが含まれると期待通りに動作しません（結果が0件になることがあります）。安全性の面では **LEFT JOIN + IS NULL** か **NOT EXISTS** を使う方が推奨されます。
-
-> **現場メモ**  
-> `NOT IN` のNULLハマりは、経験豊富なエンジニアでも油断すると踏む落とし穴です。「対象外の顧客を除いて集計」というバッチ処理を書いたとき、`NOT IN` のサブクエリに `NULL` が1件混入しただけで結果が「0件」になるバグが本番データで発生し、「集計結果がおかしい」という報告が来てから気づいた経験があります。`NOT IN` のサブクエリは `WHERE xxx IS NOT NULL` を付けて NULL を明示的に除外するか、最初から `NOT EXISTS` か `LEFT JOIN + IS NULL` を使う習慣をつけることを強くお勧めします。面接でも「NOT INのNULLについて説明してください」という質問が出ることがあります。
+> `WHERE` に集計関数を使おうとすると必ずエラーになります。  
+> 「グループの合計が〜以上」という条件は必ず `HAVING` を使います。
 
 ---
 
-## 9. JOINの実行順序のイメージ
+## 9. FILTER 句（PostgreSQL、条件付き集計）
 
-### SQLの論理的な処理順序
+PostgreSQL では `FILTER(WHERE 条件)` を集計関数に追加して条件付き集計ができます。  
+CASE 式より簡潔に書けます。
 
-SQLは書いた順に実行されるのではなく、内部的に決まった順序で処理されます：
-
-```
-1. FROM（どのテーブルを使うか）
-2. JOIN（テーブルを結合）
-3. WHERE（行を絞り込む）
-4. GROUP BY（グループ化）
-5. HAVING（グループを絞り込む）
-6. SELECT（列を選択）
-7. ORDER BY（並び替え）
-8. LIMIT（件数を制限）
-```
+### 構文
 
 ```sql
--- 実行順序を意識して読むと理解しやすい例
+集計関数(引数) FILTER(WHERE 条件)
+```
+
+### 基本的な使い方
+
+```sql
+-- ステータス別の件数を1行で集計
 SELECT
-    c.customer_name,           -- 6. この列を選ぶ
-    SUM(p.price * o.quantity)  -- 6. 合計を計算
-FROM orders o                  -- 1. ordersを起点に
-INNER JOIN customers c ON o.customer_id = c.customer_id  -- 2. 顧客と結合
-INNER JOIN products_master p ON o.product_id = p.product_id  -- 2. 商品と結合
-WHERE o.quantity > 2           -- 3. 数量2以上に絞る
-GROUP BY c.customer_name       -- 4. 顧客名でグループ化
-HAVING SUM(p.price * o.quantity) > 500  -- 5. 合計500以上に絞る
-ORDER BY SUM(p.price * o.quantity) DESC  -- 7. 降順で並べる
-LIMIT 10;                      -- 8. 10件に絞る
+    COUNT(*) AS 全件数,
+    COUNT(*) FILTER(WHERE status = '完了') AS 完了件数,
+    COUNT(*) FILTER(WHERE status = 'キャンセル') AS キャンセル件数,
+    SUM(amount) FILTER(WHERE status = '完了') AS 完了金額合計
+FROM orders;
+```
+
+### CASE 式との比較
+
+```sql
+-- CASE を使った書き方（古い方法）
+SELECT
+    COUNT(*) AS 全件数,
+    SUM(CASE WHEN status = '完了' THEN 1 ELSE 0 END) AS 完了件数,
+    SUM(CASE WHEN status = '完了' THEN amount ELSE 0 END) AS 完了金額合計
+FROM orders;
+
+-- FILTER を使った書き方（PostgreSQL推奨）
+SELECT
+    COUNT(*) AS 全件数,
+    COUNT(*) FILTER(WHERE status = '完了') AS 完了件数,
+    SUM(amount) FILTER(WHERE status = '完了') AS 完了金額合計
+FROM orders;
 ```
 
 > **ポイント**  
-> JOIN後に WHERE で絞り込まれます。そのため「JOINしてから条件を絞る」と「ON句に条件を書く」では、LEFT JOINの場合に結果が変わることがあります。意図を明確にするためにも、結合条件はON句、フィルタ条件はWHERE句に分けて書くのが基本です。
+> `FILTER` は SQL:2003 標準の構文です。PostgreSQL 9.4 以降で使えます。  
+> CASE を使った書き方より意図が明確で読みやすくなります。
+
+> **現場メモ**  
+> `FILTER` 句はPostgreSQLを使っているなら積極的に採用したい機能です。以前は `SUM(CASE WHEN status = '完了' THEN amount ELSE 0 END)` のような書き方をしていましたが、条件が増えるとCASE式が入れ子になって読みにくくなっていました。`FILTER` を知ってからはコードレビューで「これはFILTER句で書けますよ」と提案するようになりました。新規コードはFILTER句に統一することで可読性が上がります。ただしMySQL等に移植するときはFILTER句が使えないので注意が必要です。
 
 ---
 
 ## 10. よくあるミスと対処法
 
-### ミス1: カーテシアン積の発生（意図しないCROSS JOIN）
+### ミス1: COUNT(*) と COUNT(列名) を混同する
 
 ```sql
--- ON句を書き忘れると全行 × 全行になってしまう
--- 悪い例
-SELECT * FROM orders, customers;  -- これは古い記法でCROSS JOINと同じ！
+-- 「NULLを除いた件数」が欲しいのに COUNT(*) を使う
+SELECT COUNT(*) FROM orders WHERE status = '完了';
+-- NULLは既にWHEREで絞られているので問題ないが、意図を意識しよう
 
--- 正しい例
-SELECT * FROM orders o
-INNER JOIN customers c ON o.customer_id = c.customer_id;
+-- NULL を含む列の件数なら COUNT(列名) を使う
+SELECT COUNT(amount) FROM orders;  -- amountがNULLの行は除外
 ```
 
-### ミス2: LEFT JOINのWHERE条件で意図せずINNER JOINになる
+### ミス2: AVG の分母を誤解する
 
 ```sql
--- 悪い例: WHERE句に右テーブルの条件を書くとINNER JOINと同じになる
-SELECT c.customer_name, o.order_id
-FROM customers c
-LEFT JOIN orders o ON c.customer_id = o.customer_id
-WHERE o.quantity > 2;  -- NULLの行は除外されてしまう！
+-- 「全7件の平均」を期待しているが、NULLが除外されて6件の平均になる
+SELECT AVG(amount) FROM orders;  -- 2800 (16800/6)
 
--- 良い例: 右テーブルの条件はON句に書く（または意図してINNER JOINに変える）
-SELECT c.customer_name, o.order_id
-FROM customers c
-LEFT JOIN orders o ON c.customer_id = o.customer_id
-                   AND o.quantity > 2;  -- ON句に書くとNULL行が残る
+-- 全7件を分母にしたい場合
+SELECT SUM(amount) / COUNT(*) FROM orders;  -- 2400 (16800/7)
+-- ただしこれだと整数除算になる可能性があるので
+SELECT SUM(COALESCE(amount, 0)) / COUNT(*) FROM orders;
 ```
 
-> **現場メモ**  
-> 「注文履歴のない顧客も含めてレポートを作りたい」と依頼されてLEFT JOINで書いたのに、WHERE句に右テーブルの条件を書いてしまって「注文した顧客しか出ない」バグは頻出です。筆者がPRレビューで最もよく指摘するのがこのパターンです。コードを書いたエンジニア自身も「LEFT JOINを使ったから大丈夫」と思い込んでいることが多く、テストデータに「注文履歴なし顧客」を入れていないと発見が遅れます。LEFT JOINを使う際は「右テーブルがNULLになるケースのテストデータ」を必ず用意してください。
-
-### ミス3: 自己結合でエイリアスをつけ忘れる
+### ミス3: 集計結果に NULL が返ってくる
 
 ```sql
--- 悪い例: エイリアスなしだとどちらのテーブルか不明
--- SELECT id, name FROM staff JOIN staff ON manager_id = id;  -- エラー
+-- 集計対象が0件の場合、SUM/AVGはNULLを返す（COUNTは0を返す）
+SELECT SUM(amount) FROM orders WHERE customer_id = 999;
+-- 結果: NULL（対象行が0件）
 
--- 正しい例
-SELECT e.id, e.name, m.name AS manager_name
-FROM staff e
-LEFT JOIN staff m ON e.manager_id = m.id;
+-- NULLを0として扱いたい場合
+SELECT COALESCE(SUM(amount), 0) AS total FROM orders WHERE customer_id = 999;
+-- 結果: 0
 ```
 
-### ミス4: FULL OUTER JOINとUNIONの混同
+### ミス4: WHERE に集計関数を書いてしまう
 
 ```sql
--- FULL OUTER JOINはUNIONとは別物
--- UNION: 行を縦に結合する（同じ列構造が必要）
--- FULL OUTER JOIN: テーブルを横に結合する（列が増える）
+-- エラー
+SELECT customer_id FROM orders WHERE COUNT(*) > 3;
 
--- 正しく使い分けること
-SELECT id, name FROM employees
-UNION
-SELECT id, name FROM contractors;  -- 縦に結合
-
--- 横に結合するならFULL OUTER JOIN
-SELECT e.name AS employee, c.name AS contractor
-FROM employees e
-FULL OUTER JOIN contractors c ON e.id = c.id;
+-- 正しい（GROUP BY + HAVING を使う）
+SELECT customer_id, COUNT(*) AS cnt FROM orders
+GROUP BY customer_id
+HAVING COUNT(*) > 3;
 ```
 
 > **注意**  
-> JOINの種類（INNER/LEFT/RIGHT/FULL/CROSS）を間違えると、取得できる行数が大きく変わります。実行前に「何行返ってくるはずか」を頭の中でイメージする習慣をつけましょう。
+> `SUM`・`COUNT` 等の集計関数は `SELECT` 句か `HAVING` 句でしか使えません。  
+> `WHERE` 句に書くとエラーになります。
 
 ---
 
-## 11. PRレビューのチェックポイント
+## 11. ポイント
 
-JOINを使ったSQLのコードレビューで確認するポイントをまとめます。
-
-### INNER JOIN vs LEFT JOIN の選択
-
-- [ ] **「右テーブルにデータが必ずある保証があるか」を確認する**
-  - 保証がなければ LEFT JOIN を使うべき。INNER JOIN だとデータが欠ける
-- [ ] **LEFT JOIN を使ったのに WHERE 句で右テーブルの条件を書いていないか**
-  - `WHERE right_table.col = x` を書くと INNER JOIN と同じ効果になる
-  - 右テーブルへのフィルタ条件は `ON` 句に書く
-
-### パフォーマンスと可読性
-
-- [ ] **JOIN が 3 つ以上になっていたら CTE への分割を検討する**
-  - 複雑な JOIN は読みにくく、プランナーの最適化に失敗することがある
-- [ ] **CROSS JOIN が意図的かどうか確認する**
-  - `FROM a, b` という古い記法で ON 条件がない場合、意図しない CROSS JOIN になっていることがある
-- [ ] **自己結合のエイリアスが意味のある名前になっているか**
-  - `e`（employee）, `m`（manager）など、役割がわかるエイリアスをつける
-
-### アンチジョイン
-
-- [ ] **`NOT IN` のサブクエリに NULL が混入する可能性がないか**
-  - NULL が含まれると結果が 0 件になるバグが起きる
-  - `NOT EXISTS` か `LEFT JOIN + WHERE IS NULL` を推奨
-- [ ] **アンチジョインを使う場面で、単に「一致しない行を取りたい」だけか**
-  - `NOT IN` に大量データのサブクエリを渡すとパフォーマンスが悪くなる場合がある
+- `AVG` を使う場合、NULLを除外した平均でよいか要件を確認しているか
+- 集計結果が0件の場合に `SUM`・`AVG` が NULL を返すケースに `COALESCE` を適用しているか
+- `COUNT(*)` と `COUNT(列名)` の使い分けが意図に合っているか
+- 条件付き集計に `CASE` 式ではなく `FILTER` 句を使えないか（可読性向上）
+- WHERE句で集計関数を使おうとしていないか（HAVING を使う）
+- 金額集計でオーバーフローの可能性を考慮しているか（大量データ×高単価）
 
 ---
 
 ## 12. まとめ
 
 | テーマ | 要点 |
-| --- | --- |
-| FULL OUTER JOIN | 両テーブルの全行を返す。マッチしない側はNULLになる |
-| FULL OUTER JOINの用途 | 2テーブル間の差分確認・突き合わせ |
-| CROSS JOIN | 全行の組み合わせ（直積）を返す。件数に注意 |
-| CROSS JOINの用途 | カレンダー生成・マスタの組み合わせ雛形作成 |
-| 複数テーブルのJOIN | 中心テーブルをFROMに置き、左から順にJOINを重ねる |
-| 自己結合 | 同じテーブルを2回使う。必ずエイリアスをつける |
-| 自己結合の用途 | 親子関係・上司部下・同グループのペア生成 |
-| アンチジョイン | LEFT JOIN + WHERE IS NULL で「片方にしかない行」を取得 |
-| 実行順序 | FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT |
-| よくあるミス | ON句忘れ・LEFT JOINのWHERE条件・エイリアス忘れ |
+|--------|------|
+| 集計関数の基本 | 複数行を1つの値に集約する |
+| COUNT(*) | NULL を含む全行数をカウント |
+| COUNT(列名) | NULL を除いた行数をカウント |
+| SUM | NULL を無視して合計を計算 |
+| AVG | NULL を除外した平均を計算（分母に注意）|
+| MAX / MIN | NULL を無視して最大値・最小値を返す |
+| COUNT(DISTINCT) | 重複を排除した件数を取得 |
+| NULL の影響 | 集計関数は NULL を無視する。意図を確認すること |
+| WHERE と集計 | WHERE で行を絞り込んでから集計できる |
+| WHERE には使えない | 集計結果への条件は HAVING を使う |
+| FILTER 句 | 条件付き集計をシンプルに書ける（PostgreSQL）|
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS orders (
+  id          INTEGER PRIMARY KEY,
+  customer_id INTEGER NOT NULL,
+  product     TEXT,
+  amount      INTEGER NOT NULL,
+  status      TEXT    NOT NULL,
+  order_date  DATE    NOT NULL
+);
+DELETE FROM orders;
+INSERT INTO orders (id, customer_id, product, amount, status, order_date) VALUES
+  (1, 1, 'ノートPC',   98000, '完了',       '2024-01-05'),
+  (2, 2, 'マウス',      3500, '完了',       '2024-01-10'),
+  (3, 1, 'キーボード',  8000, 'キャンセル', '2024-01-12'),
+  (4, 3, 'モニター',   42000, '完了',       '2024-02-01'),
+  (5, 2, 'ノートPC',   98000, '完了',       '2024-02-05'),
+  (6, 1, 'マウス',      3500, '完了',       '2024-02-20');
+```
+
+### 問題1: 顧客ごとの注文件数
+
+> 参照：[1. 集計関数とは](#1-集計関数とは) ・ [2. COUNT(*) vs COUNT(列名)](#2-count-vs-count列名)
+
+`customer_id` ごとの注文件数を、件数が多い順に取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT customer_id, COUNT(*) AS order_count
+FROM orders
+GROUP BY customer_id
+ORDER BY order_count DESC;
+```
+
+**解説：** `GROUP BY customer_id` で顧客ごとにグループを作り、`COUNT(*)` で件数を数えます。`ORDER BY` では SELECT で付けたエイリアス名 `order_count` をそのまま使えます。
+
+</details>
+
+### 問題2: HAVING で絞り込み
+
+> 参照：[3. SUM / AVG / MAX / MIN の基本](#3-sum-avg-max-min-の基本) ・ [4. NULL が集計に与える影響](#4-null-が集計に与える影響)
+
+合計注文金額（`amount` の合計）が 100000 円以上の `customer_id` を取得してください。`status = 'キャンセル'` の注文は除外してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT customer_id, SUM(amount) AS total_amount
+FROM orders
+WHERE status <> 'キャンセル'
+GROUP BY customer_id
+HAVING SUM(amount) >= 100000;
+```
+
+**解説：** `WHERE` は集計前に行を絞り（キャンセル除外）、`HAVING` は集計後の結果を絞ります（合計10万円以上）。この実行順序を意識することが重要です：FROM → WHERE → GROUP BY → HAVING → SELECT。
+
+</details>
+
+### 問題3: 月別集計
+
+> 参照：[2. COUNT(*) vs COUNT(列名)](#2-count-vs-count列名) ・ [4. NULL が集計に与える影響](#4-null-が集計に与える影響)
+
+`order_date` の年月ごとに注文件数と合計金額を集計し、年月の昇順で表示してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT
+  TO_CHAR(order_date, 'YYYY-MM') AS month,
+  COUNT(*)                        AS order_count,
+  SUM(amount)                     AS total_amount
+FROM orders
+GROUP BY TO_CHAR(order_date, 'YYYY-MM')
+ORDER BY month ASC;
+```
+
+**解説：** `TO_CHAR(order_date, 'YYYY-MM')` で日付を年月文字列に変換してからグループ化します。`GROUP BY` にも同じ式を記述する必要があります（PostgreSQL では SELECT のエイリアスを GROUP BY に使えません）。
+
+</details>

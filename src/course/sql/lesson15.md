@@ -1,567 +1,644 @@
-# UPDATE と DELETE
-データを安全に更新・削除するための書き方と事故防止の考え方を学びます
+# VIEW
+VIEWで複雑なSELECTに名前をつけ、再利用可能にします
 
 ## 本章の目標
 
 本章では以下を目標にして学習します。
 
-- UPDATE の基本構文で特定の行のデータを更新できること
-- WHERE なし UPDATE の危険性を理解し、事故を防げること
-- DELETE の基本構文で特定の行を削除できること
-- TRUNCATE と DELETE の違いを説明できること
-- トランザクションを使って安全に更新・削除ができること
-- 論理削除パターンを実装できること
+- VIEWとは何かを説明できること
+- CREATE VIEWで仮想テーブルを作成・管理できること
+- VIEWのメリット（再利用性・セキュリティ）を理解できること
+- 通常VIEWとマテリアライズドビューの違いを理解できること
+- VIEWの使いすぎによるパフォーマンス問題を把握できること
 
 ---
 
-## 1. UPDATE の基本構文
+## 1. VIEWとは（仮想テーブル）
 
-UPDATE 文は既存の行のデータを変更します。
+### VIEWの概念
 
-```sql
-UPDATE テーブル名
-SET 列1 = 値1, 列2 = 値2
-WHERE 条件;
-```
+**VIEW（ビュー）**は、SELECTクエリに名前をつけてデータベースに保存したものです。実際のデータを持たず、参照されるたびに元のSELECTが実行されます。そのため「**仮想テーブル**」とも呼ばれます。
 
-本章で使うサンプルテーブルを用意します。
+身近な例で例えると、図書館の「新着本コーナー」のようなものです。実際に本が移動しているわけではなく、「新着の本を並べた棚」というラベルが付いた参照先に過ぎません。でも利用者はその棚を見るだけで目的の本を探せます。
 
 ```sql
--- 商品テーブル
+-- テーブル準備
 CREATE TABLE products (
-    id          SERIAL PRIMARY KEY,
-    code        TEXT UNIQUE NOT NULL,
-    name        TEXT NOT NULL,
-    price       INTEGER NOT NULL DEFAULT 0,
-    stock       INTEGER NOT NULL DEFAULT 0,
-    category    TEXT,
-    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
-    deleted_at  TIMESTAMP
+    product_id   INT PRIMARY KEY,
+    product_name TEXT,
+    category     TEXT,
+    price        INT,
+    stock        INT
 );
 
-INSERT INTO products (code, name, price, stock, category) VALUES
-('APPLE-001', 'りんご',   150, 100, '果物'),
-('BANANA-001', 'バナナ',  120,  80, '果物'),
-('CARROT-001', 'にんじん', 60,  90, '野菜'),
-('SPINACH-001', 'ほうれん草', 80, 60, '野菜'),
-('BEEF-001', '牛肉',     1200,  20, '肉類');
-
--- 注文テーブル
-CREATE TABLE orders (
-    id          SERIAL PRIMARY KEY,
-    product_id  INTEGER NOT NULL REFERENCES products(id),
-    quantity    INTEGER NOT NULL,
-    order_date  DATE NOT NULL DEFAULT CURRENT_DATE,
-    status      TEXT NOT NULL DEFAULT '受付中'
+CREATE TABLE order_details (
+    detail_id  INT PRIMARY KEY,
+    product_id INT,
+    quantity   INT,
+    ordered_at TIMESTAMP DEFAULT NOW()
 );
 
-INSERT INTO orders (product_id, quantity, order_date, status) VALUES
-(1, 5,  '2024-01-05', '完了'),
-(2, 3,  '2024-01-10', '受付中'),
-(3, 10, '2024-02-03', '完了'),
-(1, 2,  '2024-02-08', '受付中'),
-(5, 1,  '2024-03-01', '完了');
-```
+INSERT INTO products VALUES
+    (1, 'りんご',   '果物', 150, 100),
+    (2, 'みかん',   '果物', 100, 200),
+    (3, 'にんじん', '野菜',  80, 150),
+    (4, 'キャベツ', '野菜',  200, 80),
+    (5, 'バナナ',   '果物', 120, 50);
 
-### 例：りんごの価格を 150 → 180 に変更する
-
-```sql
-UPDATE products
-SET price = 180
-WHERE code = 'APPLE-001';
-```
-
-### 例：複数列を同時に更新する（後述のセクション3）
-
-```sql
-UPDATE products
-SET
-    price    = 180,
-    stock    = 90,
-    category = '国産果物'
-WHERE code = 'APPLE-001';
+INSERT INTO order_details VALUES
+    (1, 1, 3, '2024-03-01 10:00:00'),
+    (2, 2, 5, '2024-03-02 11:00:00'),
+    (3, 1, 2, '2024-03-03 09:00:00'),
+    (4, 3, 4, '2024-03-04 14:00:00'),
+    (5, 5, 1, '2024-03-05 16:00:00');
 ```
 
 > **ポイント**  
-> UPDATE を実行する前に、必ず WHERE 条件を確認しましょう。  
-> WHERE を書き忘れると、テーブルの **全行** が更新されてしまいます。
+> VIEWはデータのコピーではありません。VIEWを参照するたびに元テーブルからデータが取得されるため、元テーブルのデータが変わればVIEWの結果も自動的に最新になります。
 
 ---
 
-## 2. WHERE なし UPDATE の危険性
+## 2. CREATE VIEW の構文
 
-WHERE を指定しないと、テーブルの全行が更新されます。
+### VIEWを作成する
 
 ```sql
--- NG：これはすべての商品価格が 0 になる（全行更新）
-UPDATE products
-SET price = 0;
--- 5行すべて更新される！
+-- 基本構文
+CREATE VIEW ビュー名 AS
+SELECT ...;
+
+-- 実例: 果物商品の一覧ビュー
+CREATE VIEW fruits_view AS
+SELECT product_id, product_name, price, stock
+FROM products
+WHERE category = '果物';
+
+-- VIEWを使う（通常のテーブルと同じように使える）
+SELECT * FROM fruits_view;
+
+-- VIEWに対してWHEREやORDER BYも使える
+SELECT product_name, price
+FROM fruits_view
+WHERE price > 110
+ORDER BY price DESC;
 ```
 
+### 複雑なクエリにVIEWをつける
+
 ```sql
--- このように実行するつもりだったとしても...
-UPDATE products
-SET price = 0
--- WHERE を書き忘れた！
-;
+-- 商品別の注文合計を計算する複雑なクエリ
+CREATE VIEW product_sales_summary AS
+SELECT
+    p.product_id,
+    p.product_name,
+    p.category,
+    p.price,
+    COALESCE(SUM(od.quantity), 0)        AS total_ordered,
+    COALESCE(SUM(od.quantity * p.price), 0) AS total_revenue
+FROM products p
+LEFT JOIN order_details od ON p.product_id = od.product_id
+GROUP BY p.product_id, p.product_name, p.category, p.price;
+
+-- 作成後はシンプルに参照できる
+SELECT * FROM product_sales_summary ORDER BY total_revenue DESC;
+```
+
+> **ポイント**  
+> VIEWを使うことで、複雑なJOINやGROUP BYを毎回書かずに済みます。SQLを書く人全員がこのVIEW名を使えば、計算ロジックを統一できます。
+
+---
+
+## 3. CREATE OR REPLACE VIEW
+
+### 既存VIEWを更新する
+
+VIEWの定義を変更したい場合、`CREATE OR REPLACE VIEW` を使うと既存のVIEWを置き換えられます。
+
+```sql
+-- 既存のVIEWを上書き更新
+CREATE OR REPLACE VIEW fruits_view AS
+SELECT
+    product_id,
+    product_name,
+    price,
+    stock,
+    price * stock AS inventory_value  -- 新しい列を追加
+FROM products
+WHERE category = '果物';
+
+-- 確認
+SELECT * FROM fruits_view;
+```
+
+### VIEWの定義を確認する
+
+```sql
+-- VIEWの定義を確認
+SELECT definition
+FROM pg_views
+WHERE viewname = 'fruits_view';
+
+-- または
+\d+ fruits_view  -- psqlコマンドラインツールの場合
 ```
 
 > **注意**  
-> WHERE を書き忘れた UPDATE は、取り消しできません（トランザクション外の場合）。  
-> 本番データで誤って全行更新してしまった事故は実際に起きています。  
-> 後述する「事故防止パターン」を必ず実践しましょう。
+> `CREATE OR REPLACE VIEW` はWHERE句や列の追加は可能ですが、既存の列を削除したり型を変更したりはできません。その場合はいったん `DROP VIEW` してから再作成する必要があります。
+
+---
+
+## 4. VIEWのメリット（複雑なクエリの隠蔽・セキュリティ）
+
+### メリット1: 複雑なクエリの隠蔽と再利用
+
+```sql
+-- 毎回書くのが大変な複雑なクエリ
+-- （JOINが多い、サブクエリが多い、計算が複雑など）
+-- これをVIEWにすれば1行で使える
+
+-- ビュー: 月次売上レポート（複雑な計算をカプセル化）
+CREATE VIEW monthly_sales_report AS
+SELECT
+    DATE_TRUNC('month', od.ordered_at) AS month,
+    p.category,
+    COUNT(DISTINCT od.detail_id) AS transaction_count,
+    SUM(od.quantity)              AS total_quantity,
+    SUM(od.quantity * p.price)    AS total_revenue,
+    AVG(od.quantity * p.price)    AS avg_order_value
+FROM order_details od
+INNER JOIN products p ON od.product_id = p.product_id
+GROUP BY DATE_TRUNC('month', od.ordered_at), p.category;
+
+-- 利用は簡単
+SELECT * FROM monthly_sales_report
+WHERE month = '2024-03-01'
+ORDER BY total_revenue DESC;
+```
+
+### メリット2: セキュリティ（列・行の制限）
+
+```sql
+-- 給与テーブル（機密情報を含む）
+CREATE TABLE salary_info (
+    emp_id     INT PRIMARY KEY,
+    emp_name   TEXT,
+    salary     INT,
+    bonus      INT,
+    bank_account TEXT  -- 機密情報
+);
+
+INSERT INTO salary_info VALUES
+    (1, '田中', 500000, 50000, '0001-001-1234567'),
+    (2, '鈴木', 600000, 60000, '0002-002-9876543');
+
+-- 機密情報を除いたビューを作成
+CREATE VIEW safe_salary_view AS
+SELECT emp_id, emp_name, salary
+FROM salary_info;
+-- bank_account は含めない！
+
+-- 一般ユーザーにはビューだけアクセス権を与える
+-- GRANT SELECT ON safe_salary_view TO general_user;
+
+SELECT * FROM safe_salary_view;  -- bank_accountは見えない
+```
+
+> **ポイント**  
+> VIEWはセキュリティ管理のツールとしても使えます。ユーザーに直接テーブルへのアクセスを与えず、必要な列・行だけを見せるVIEWへのアクセスのみ許可することで、情報漏洩リスクを下げられます。
+
+---
+
+## 5. VIEWへのSELECT
+
+### VIEWは通常テーブルと同じように使える
+
+```sql
+-- WHERE句
+SELECT product_name, total_revenue
+FROM product_sales_summary
+WHERE total_revenue > 500;
+
+-- ORDER BY
+SELECT *
+FROM product_sales_summary
+ORDER BY total_ordered DESC
+LIMIT 3;
+
+-- 別のVIEWやテーブルとJOINも可能
+SELECT
+    ps.product_name,
+    ps.total_revenue,
+    f.stock  -- fruitsビューのstock列
+FROM product_sales_summary ps
+INNER JOIN fruits_view f ON ps.product_id = f.product_id;
+
+-- VIEWに対してCOUNTなどの集計も可能
+SELECT COUNT(*), AVG(total_revenue)
+FROM product_sales_summary;
+```
+
+> **ポイント**  
+> VIEWはSELECTの観点では通常テーブルと全く同じように扱えます。JOINすることも、WHERE/GROUP BY/ORDER BYを使うことも、別のVIEWのFROMに書くことも可能です。
+
+---
+
+## 6. VIEWの更新（updatable viewの条件）
+
+### 更新可能なVIEW（Updatable View）
+
+VIEWに対してINSERT/UPDATE/DELETEを行うには、VIEWが**更新可能（updatable）**である必要があります。以下の条件をすべて満たす必要があります：
+
+- FROM句にテーブルが1つだけ（JOINなし）
+- DISTINCT なし
+- GROUP BY / HAVING なし
+- UNION / INTERSECT / EXCEPT なし
+- 集計関数（SUM, AVG等）なし
+- ウィンドウ関数なし
+- サブクエリが列参照を含まない
+
+```sql
+-- 更新可能なシンプルなVIEW
+CREATE VIEW simple_fruits AS
+SELECT product_id, product_name, price, stock
+FROM products
+WHERE category = '果物';
+
+-- VIEWを通じてUPDATE（元テーブルが変わる）
+UPDATE simple_fruits
+SET price = 180
+WHERE product_name = 'りんご';
+
+-- 元テーブルを確認すると価格が変わっている
+SELECT * FROM products WHERE product_name = 'りんご';
+
+-- VIEWを通じてINSERT
+INSERT INTO simple_fruits (product_id, product_name, price, stock)
+VALUES (6, 'ぶどう', 300, 30);
+-- 注意: categoryが指定できないのでNULLになる
+-- WITH CHECK OPTION を使うと条件外の挿入を防げる
+
+-- WITH CHECK OPTIONで整合性を保つ
+CREATE OR REPLACE VIEW simple_fruits AS
+SELECT product_id, product_name, price, stock
+FROM products
+WHERE category = '果物'
+WITH CHECK OPTION;  -- category='果物'でない行の挿入を防ぐ
+```
+
+> **注意**  
+> JOINやGROUP BYを含む複雑なVIEWは更新不可です。更新可能かどうかを確認するには `pg_views` の `is_updatable` 列を参照できます。実務ではVIEWへの直接更新は避け、元テーブルを直接操作する方が安全です。
+
+---
+
+## 7. DROP VIEW（CASCADE）
+
+### VIEWを削除する
+
+```sql
+-- 基本的な削除
+DROP VIEW fruits_view;
+
+-- VIEWが存在しない場合でもエラーを出さない
+DROP VIEW IF EXISTS fruits_view;
+
+-- 依存するオブジェクト（他のVIEWや関数）も一緒に削除
+DROP VIEW fruits_view CASCADE;
+-- 注意: CASCADEは依存先も削除するため慎重に使う
+
+-- RESTRICT（デフォルト）: 依存先がある場合はエラー
+DROP VIEW fruits_view RESTRICT;
+
+-- VIEWの一覧を確認
+SELECT viewname, viewowner
+FROM pg_views
+WHERE schemaname = 'public';
+```
+
+> **注意**  
+> `CASCADE` を使うと、そのVIEWを参照している他のVIEWや関数もすべて削除されます。本番環境では必ず依存関係を確認してから削除しましょう。
+
+---
+
+## 8. マテリアライズドビュー（MATERIALIZED VIEW）の概念
+
+### 通常VIEWとの違い
+
+通常のVIEWは「参照するたびに元のSELECTを実行する仮想テーブル」ですが、**マテリアライズドビュー（MATERIALIZED VIEW）**は「クエリの結果を実際にディスクに保存する物理テーブル」です。
+
+| 比較項目 | 通常VIEW | マテリアライズドビュー |
+|----------|----------|----------------------|
+| データ保存 | しない（毎回クエリ実行） | する（結果をキャッシュ） |
+| 読み取り速度 | 元クエリの速度に依存 | 高速（保存済みデータを読む） |
+| 最新性 | 常に最新 | REFRESH時のみ更新 |
+| 書き込みオーバーヘッド | なし | REFRESHのコスト |
+| インデックス | 付けられない | 付けられる |
+
+```sql
+-- マテリアライズドビューの作成
+CREATE MATERIALIZED VIEW product_sales_mat AS
+SELECT
+    p.product_id,
+    p.product_name,
+    p.category,
+    COALESCE(SUM(od.quantity), 0)           AS total_ordered,
+    COALESCE(SUM(od.quantity * p.price), 0) AS total_revenue
+FROM products p
+LEFT JOIN order_details od ON p.product_id = od.product_id
+GROUP BY p.product_id, p.product_name, p.category, p.price;
+
+-- 参照（通常テーブルと同じ）
+SELECT * FROM product_sales_mat ORDER BY total_revenue DESC;
+
+-- マテリアライズドビューにインデックスを追加できる
+CREATE INDEX idx_mat_category ON product_sales_mat (category);
+```
+
+> **ポイント**  
+> 重い集計クエリを毎回実行したくない場合、マテリアライズドビューに保存しておくと参照が高速になります。ただしデータは自動更新されないため、手動または定期的なREFRESHが必要です。
+
+---
+
+## 9. マテリアライズドビューのリフレッシュ（REFRESH MATERIALIZED VIEW）
+
+### データを更新する
+
+```sql
+-- 元テーブルのデータを変更
+INSERT INTO order_details VALUES (6, 4, 10, NOW());
+
+-- マテリアライズドビューは自動更新されない（古いデータのまま）
+SELECT * FROM product_sales_mat WHERE product_id = 4;
+
+-- REFRESHで手動更新
+REFRESH MATERIALIZED VIEW product_sales_mat;
+
+-- 更新後に確認
+SELECT * FROM product_sales_mat WHERE product_id = 4;
+
+-- REFRESH中もSELECT可能にする（ロックなしで更新）
+-- ただし一意なインデックスが必要
+CREATE UNIQUE INDEX idx_mat_product_id ON product_sales_mat (product_id);
+
+REFRESH MATERIALIZED VIEW CONCURRENTLY product_sales_mat;
+-- CONCURRENTLYを使うと更新中もVIEWが参照できる（一意インデックス必須）
+```
+
+### 定期的なREFRESHの設定
+
+```sql
+-- PostgreSQLにはスケジュール実行機能がないため、
+-- pg_cronやcronジョブで定期実行するのが一般的
+
+-- pg_cronの例（毎時0分にREFRESH）
+-- SELECT cron.schedule('0 * * * *', $$REFRESH MATERIALIZED VIEW CONCURRENTLY product_sales_mat$$);
+
+-- または外部のcronジョブから
+-- psql -d mydb -c "REFRESH MATERIALIZED VIEW CONCURRENTLY product_sales_mat"
+```
+
+> **ポイント**  
+> `CONCURRENTLY` オプションを使うとREFRESH中もSELECTできます（ロックなし）。ただし一意インデックスが必要で、初回のCONCURRENT REFRESHはできません（通常のREFRESH後にCONCURRENTLYが使えます）。
+
+---
+
+## 10. VIEWを使いすぎる危険（ネストが深くなるとパフォーマンス問題）
+
+### ネストしたVIEWの問題
+
+```sql
+-- VIEWがVIEWを参照するとネストが深くなる
+CREATE VIEW view_a AS
+SELECT * FROM products WHERE category = '果物';
+
+CREATE VIEW view_b AS
+SELECT * FROM view_a WHERE price > 100;  -- view_aを参照
+
+CREATE VIEW view_c AS
+SELECT * FROM view_b WHERE stock > 50;  -- view_bを参照（view_a → products）
+
+-- view_cへのクエリは実際には3段階展開される
+SELECT * FROM view_c;
+-- → SELECT * FROM (SELECT * FROM (SELECT * FROM products WHERE ...) WHERE ...) WHERE ...
+```
+
+### パフォーマンス問題の例
+
+```sql
+-- 問題のあるパターン: 複雑なVIEWをさらにJOINする
+-- products_summary_view（複雑な集計含む）
+-- ↓
+-- top_products_view（products_summary_viewを参照）
+-- ↓
+-- final_report_view（top_products_viewとその他のビューをJOIN）
+
+-- このような多段VIEWは、最終的に何十本もJOINされた巨大クエリになる
+
+-- 対策: VIEWの代わりにマテリアライズドビューを使う
+-- 対策: VIEWのネストは3段以内に抑える
+-- 対策: 複雑な中間処理はCTEやアプリケーション層で処理する
+
+-- EXPLAINで展開後のクエリを確認する
+EXPLAIN SELECT * FROM product_sales_summary;
+```
+
+> **注意**  
+> VIEWはクエリを隠蔽してくれますが、その内部では毎回元のSELECTが実行されます。複数のVIEWが積み重なると、実行時に何十テーブルもJOINされた巨大クエリが走ることになり、パフォーマンスが著しく低下します。「VIEWが3つ以上ネストしたら要注意」と覚えておきましょう。
 
 > **現場メモ**  
-> `UPDATE products SET price = 0` をWHERE句なしで実行して全商品の価格が0円になった、という事故は現場では本当に起きます。「たった1行のミスが数万件のデータを吹き飛ばす」のがUPDATE/DELETEの怖さです。筆者も新人のころ、本番でWHERE句を書き忘れて全行更新してしまい、バックアップから復元するという経験をしました。それ以来、本番DBで手動SQLを実行するときは必ず「① SELECTで対象行を確認 → ② BEGINでトランザクション開始 → ③ UPDATE/DELETE実行 → ④ 件数とデータを目視確認 → ⑤ COMMIT」という手順を必ず踏むようにしています。ツールによっては「safe-update mode」（WHERE句のないUPDATE/DELETEを拒否する設定）も活用できます。
-
-### 安全のための確認手順
-
-```sql
--- 手順1：まず SELECT で対象行を確認する
-SELECT id, code, name, price
-FROM products
-WHERE code = 'APPLE-001';   -- これで1行だけ返ってくるか確認
-
--- 手順2：確認できたら UPDATE を実行する
-UPDATE products
-SET price = 180
-WHERE code = 'APPLE-001';
-```
+> VIEWは便利ですが「VIEWに変更を加えたら依存するVIEWが壊れた」という問題が起きることがあります。VIEW Aを変更したらVIEW AをJOINしているVIEW Bがエラーになり、さらにVIEW BをSELECTしているアプリコードが動かなくなる、という連鎖崩壊です。筆者が関わったプロジェクトでは多段VIEWが10本以上あり、どのVIEWがどのVIEWに依存しているかの把握が困難になっていました。`pg_depend` や `information_schema.view_column_usage` でVIEWの依存関係を確認する習慣を持ちましょう。また、マテリアライズドビューのREFRESHタイミングもよく問題になります。「最新データが出ない」という報告が来て調べたら、マテリアライズドビューのREFRESHが止まっていた、という事象は珍しくありません。
 
 ---
 
-## 3. 複数列の同時更新
+## 11. よくあるミス
 
-SET 句にカンマ区切りで複数列を並べることで、1つの UPDATE で複数列を更新できます。
+### ミス1: VIEWのデータが古いと思って困惑する
 
 ```sql
--- 複数列を一度に更新
-UPDATE products
-SET
-    price    = 200,
-    stock    = 150,
-    category = '特選果物'
-WHERE id = 1;
+-- 通常VIEWは常に最新（毎回クエリが実行される）
+-- マテリアライズドビューはREFRESHしないと古い
+
+-- 確認: 今参照しているのは通常VIEWか？マテリアライズドか？
+SELECT schemaname, matviewname  -- マテリアライズドビューの一覧
+FROM pg_matviews
+WHERE schemaname = 'public';
+
+SELECT schemaname, viewname  -- 通常VIEWの一覧
+FROM pg_views
+WHERE schemaname = 'public';
 ```
 
+### ミス2: 更新不可なVIEWに対してUPDATEしてエラー
+
 ```sql
--- 現在の値に基づいた計算で更新
-UPDATE products
-SET
-    price = price * 1.1,           -- 現在の価格の 1.1 倍（値上げ10%）
-    stock = stock - 5              -- 在庫を5減らす
-WHERE category = '果物'
-  AND stock > 5;                   -- 在庫が5以上の商品のみ
+-- JOINを含むVIEWには直接UPDATEできない
+-- CREATE VIEW product_order_view AS
+-- SELECT p.product_name, od.quantity
+-- FROM products p JOIN order_details od ON p.product_id = od.product_id;
+
+-- UPDATE product_order_view SET quantity = 10;  -- エラー！
+
+-- 解決策: 元テーブルを直接UPDATEする
+UPDATE order_details SET quantity = 10 WHERE detail_id = 1;
 ```
 
-> **ポイント**  
-> `SET 列名 = 列名 + 値` のように現在の値を参照した計算もできます。  
-> これは在庫の加減算や、カウンタの増減によく使われます。
-
----
-
-## 4. UPDATE ... FROM（別テーブルを参照した更新）
-
-別テーブルのデータを参照して UPDATE できます。  
-PostgreSQL 特有の `UPDATE ... FROM` 構文を使います。
-
-### 例：注文テーブルから数量を取得して在庫を減らす
+### ミス3: DROP VIEW で依存先が消える
 
 ```sql
--- 完了した注文の数量だけ在庫を減らす
-UPDATE products AS p
-SET stock = p.stock - o.quantity
-FROM orders AS o
-WHERE p.id = o.product_id
-  AND o.status = '完了'
-  AND o.order_date = CURRENT_DATE;
+-- 誤ってCASCADEを付けると依存するVIEWも全削除
+-- DROP VIEW base_view CASCADE;  -- base_viewを参照するVIEWも全部消える！
+
+-- 安全な確認方法: まず依存関係を調べる
+SELECT DISTINCT
+    dependent_view.relname AS dependent_view
+FROM pg_depend
+INNER JOIN pg_rewrite ON pg_depend.objid = pg_rewrite.oid
+INNER JOIN pg_class AS dependent_view ON pg_rewrite.ev_class = dependent_view.oid
+INNER JOIN pg_class AS source_table ON pg_depend.refobjid = source_table.oid
+WHERE source_table.relname = 'fruits_view'
+  AND source_table.relkind = 'v';
 ```
 
-### 例：別テーブルのマスタ価格を反映する
+### ミス4: SELECT * をVIEWに使う
 
 ```sql
--- 価格マスタテーブルの価格を商品テーブルに反映する
-CREATE TABLE price_master (
-    product_code TEXT PRIMARY KEY,
-    new_price    INTEGER NOT NULL
-);
+-- 悪い例: SELECT * のVIEW
+-- CREATE VIEW all_products AS SELECT * FROM products;
+-- products テーブルに列を追加しても、CREATE OR REPLACEしないと新しい列が出ない場合がある
 
-INSERT INTO price_master VALUES
-('APPLE-001',  200),
-('BANANA-001', 130);
-
--- price_master の価格で products を更新
-UPDATE products AS p
-SET price = pm.new_price
-FROM price_master AS pm
-WHERE p.code = pm.product_code;
-```
-
-> **ポイント**  
-> `UPDATE ... FROM` は PostgreSQL の拡張です。  
-> 標準 SQL のサブクエリ方式（`UPDATE ... SET 列 = (SELECT ...)  WHERE ...`）でも同じことができます。  
-> PostgreSQL では FROM を使った方が可読性が高くなることが多いです。
-
----
-
-## 5. RETURNING 句（更新後の値を確認）
-
-INSERT と同様に、UPDATE でも RETURNING 句で更新後の値を取得できます。
-
-```sql
--- 更新後の値を返す
-UPDATE products
-SET price = price * 1.1
-WHERE category = '果物'
-RETURNING id, code, name, price AS new_price;
-```
-
-実行結果イメージ：
-
-| id | code        | name   | new_price |
-|----|-------------|--------|-----------|
-| 1  | APPLE-001   | りんご | 198       |
-| 2  | BANANA-001  | バナナ | 132       |
-
-```sql
--- 更新前の値と更新後の値を比較する（サブクエリを使う）
-WITH updated AS (
-    UPDATE products
-    SET price = price * 1.1
-    WHERE category = '果物'
-    RETURNING id, code, name, price AS new_price
-)
-SELECT
-    u.code,
-    u.name,
-    p.price                    AS old_price,
-    u.new_price
-FROM updated AS u
-JOIN products AS p ON u.id = p.id;
-```
-
-> **ポイント**  
-> RETURNING を使うと UPDATE 後の値を確認できます。  
-> アプリケーション側で「更新後の値をすぐ使いたい」場合に、追加の SELECT が不要です。
-
----
-
-## 6. DELETE の基本構文
-
-DELETE 文は行を削除します。
-
-```sql
-DELETE FROM テーブル名
-WHERE 条件;
-```
-
-### 例：特定の商品を削除する
-
-```sql
--- id = 5 の商品を削除する
-DELETE FROM products
-WHERE id = 5;
-```
-
-```sql
--- 在庫ゼロの商品をすべて削除する
-DELETE FROM products
-WHERE stock = 0;
-```
-
-> **ポイント**  
-> 外部キー参照がある場合（orders が products を参照している等）、  
-> 参照されている行を DELETE しようとすると外部キー制約エラーになります。  
-> 先に子テーブルの行を削除してから親テーブルを削除するか、  
-> `ON DELETE CASCADE` を設定する必要があります。
-
----
-
-## 7. WHERE なし DELETE の危険性
-
-WHERE を指定しないと、テーブルの **全行** が削除されます。
-
-```sql
--- NG：これはテーブルの全行が削除される！
-DELETE FROM products;
--- 5行すべて削除される！
+-- 良い例: 明示的に列を指定
+CREATE OR REPLACE VIEW all_products AS
+SELECT product_id, product_name, category, price, stock
+FROM products;
 ```
 
 > **注意**  
-> WHERE なし DELETE は本番環境で絶対に避けなければならない操作です。  
-> 削除したデータはトランザクション外では復元できません。  
-> 必ず WHERE 条件を付け、事前に SELECT で対象行を確認してから実行しましょう。
+> VIEWに `SELECT *` を使うと、元テーブルの列が変わったときに予期しない動作をすることがあります。列名を明示的に指定するのが安全です。
 
 ---
 
-## 8. DELETE ... USING（別テーブルを参照した削除）
+## 12. ポイント
 
-別テーブルの条件を参照して削除できます。
-
-```sql
--- キャンセルされた注文の商品を削除する例
--- （実務ではこういうケースは論理削除で対応するのが一般的）
-DELETE FROM orders AS o
-USING products AS p
-WHERE o.product_id = p.id
-  AND p.is_active = FALSE
-  AND o.status = '受付中';
-```
-
-```sql
--- 30日以上前に完了した注文を削除する
-DELETE FROM orders
-WHERE status = '完了'
-  AND order_date < CURRENT_DATE - INTERVAL '30 days';
-```
-
-> **ポイント**  
-> DELETE ... USING は PostgreSQL の拡張構文です。  
-> 標準 SQL では `DELETE FROM テーブル WHERE 列 IN (SELECT ...)` のように書きます。
+- **VIEW のネストが 3 段以上になっていないか**
+  - 多段 VIEW はパフォーマンス劣化の原因。EXPLAIN で展開後のクエリを確認する
+- **VIEW 内で `SELECT *` を使っていないか**
+  - テーブルにカラムを追加したとき VIEW が古い定義のままになる
+- **更新可能な VIEW（Updatable View）に意図しない INSERT / UPDATE をしていないか**
+  - VIEW への書き込みが意図通りに元テーブルに反映されるか確認する
+- **マテリアライズドビューの REFRESH タイミングが要件と合っているか**
+  - 「リアルタイムに最新データが必要か」「1時間遅延でも許容できるか」を確認
+- **DROP VIEW CASCADE を使う前に依存先の VIEW / クエリを確認しているか**
+  - CASCADE は依存する VIEW も連鎖削除する
 
 ---
 
-## 9. TRUNCATE vs DELETE
-
-テーブルの全データを消去したい場合、DELETE と TRUNCATE の2つの方法があります。
-
-| 比較項目 | DELETE（WHERE なし） | TRUNCATE |
-|---------|---------------------|---------|
-| 速度 | 遅い（行を1行ずつ処理） | 速い（ページ単位で削除） |
-| ロールバック | 可能 | 可能（PostgreSQL ではトランザクション内なら） |
-| RETURNING 句 | 使える | 使えない |
-| トリガー | 発火する | TRUNCATE トリガーのみ発火（ROW レベルトリガーは非発火） |
-| 自動採番リセット | されない | RESTART IDENTITY でリセット可能 |
-| 外部キー参照 | エラーになる | CASCADE を指定しないとエラー |
-
-```sql
--- TRUNCATE の基本（全行削除）
-TRUNCATE TABLE products;
-
--- TRUNCATE + シーケンスリセット
-TRUNCATE TABLE products RESTART IDENTITY;
-
--- 外部キー参照のある関連テーブルも含めて削除
-TRUNCATE TABLE products CASCADE;
-```
-
-> **注意**  
-> PostgreSQL では TRUNCATE もトランザクション内であればロールバックできます。  
-> しかし MySQL では TRUNCATE は暗黙の COMMIT を発行するため、ロールバックできません。  
-> DB の種類によって挙動が異なる点に注意しましょう。
-
----
-
-## 10. 事故防止パターン
-
-実務での更新・削除は「一発でやらない」ことが大原則です。  
-以下のパターンを必ず守りましょう。
-
-### 黄金パターン：SELECT → BEGIN → DML → 確認 → COMMIT
-
-```sql
--- ステップ1：まず SELECT で対象行を確認する
-SELECT id, code, name, price
-FROM products
-WHERE category = '果物';
--- → 期待通りの行が返ってきているか確認
-
--- ステップ2：トランザクションを開始する
-BEGIN;
-
--- ステップ3：UPDATE または DELETE を実行する
-UPDATE products
-SET price = price * 1.2
-WHERE category = '果物';
--- UPDATE 2 のように影響行数が表示される
-
--- ステップ4：結果を SELECT で確認する
-SELECT id, code, name, price FROM products WHERE category = '果物';
--- → 値が正しく変わっているか確認
-
--- ステップ5：問題なければ COMMIT、おかしければ ROLLBACK
-COMMIT;    -- 確定
--- または
-ROLLBACK;  -- 取り消し
-```
-
-> **注意**  
-> `BEGIN` なしで DML を実行すると、即座にコミットされます（オートコミット）。  
-> 取り消しができないため、特に本番環境では必ず BEGIN から始めましょう。
-
-### WHERE 条件の件数確認パターン
-
-```sql
--- WHERE 条件に一致する件数を先に確認する
-SELECT COUNT(*) FROM products WHERE category = '果物';
--- → 2件
-
--- 件数が想定通りなら UPDATE を実行
-UPDATE products SET price = price * 1.2 WHERE category = '果物';
--- UPDATE 2 ← 件数が一致しているか確認
-```
-
----
-
-## 11. 論理削除の実装パターン
-
-「削除」といっても、実際には行を消さずに「削除フラグ」を立てるだけの設計があります。  
-これを **論理削除** といいます。
-
-### 論理削除とは
-
-| 物理削除 | 論理削除 |
-|---------|---------|
-| DELETE で行を消す | is_deleted = TRUE や deleted_at = NOW() を設定 |
-| データは復元不可（バックアップから戻すしかない） | フラグを戻せばデータが復元できる |
-| ストレージを節約できる | 削除済みデータが残るためストレージを消費 |
-| 参照整合性を保ちやすい | 常に WHERE deleted_at IS NULL を付けなければならない |
-
-### 実装例：deleted_at 列による論理削除
-
-```sql
--- 削除する（deleted_at に現在時刻を入れる）
-UPDATE products
-SET deleted_at = NOW()
-WHERE id = 3;
-
--- 有効なレコードのみ取得（常に WHERE deleted_at IS NULL が必要）
-SELECT id, code, name, price
-FROM products
-WHERE deleted_at IS NULL;
-
--- 削除済みのレコードを復元する
-UPDATE products
-SET deleted_at = NULL
-WHERE id = 3;
-```
-
-### ビューで隠ぺいする
-
-毎回 `WHERE deleted_at IS NULL` を書くのを忘れると、削除済みデータが混入します。  
-ビューを使ってデフォルトで除外する設計が有効です。
-
-```sql
--- 有効な商品のみを返すビュー
-CREATE VIEW active_products AS
-SELECT *
-FROM products
-WHERE deleted_at IS NULL;
-
--- ビューから SELECT すれば条件不要
-SELECT id, code, name, price
-FROM active_products;
-```
-
-> **ポイント**  
-> 論理削除を採用する場合のデメリット：  
-> - クエリに常に `WHERE deleted_at IS NULL` が必要（忘れるとバグの原因）  
-> - テーブルが肥大化する（定期的なアーカイブが必要）  
-> - 外部キー制約が「論理削除済みのレコードを参照しているか」を検知しない  
-> 
-> 論理削除が適しているのは「削除履歴を残したい」「誤削除を復元したい」場合です。  
-> 要件に応じて物理削除と使い分けましょう。
-
----
-
-## 12. よくあるミス
-
-### ミス1：WHERE を付けずに全行更新・削除
-
-```sql
--- NG（全行更新）
-UPDATE products SET price = 0;
-
--- NG（全行削除）
-DELETE FROM products;
-```
-
-**対処法：** 必ず BEGIN してから実行し、ROLLBACK できる状態にしておく。  
-WHERE 条件を先に SELECT で確認する。
-
-### ミス2：外部キー制約エラー
-
-```sql
--- NG：orders が product_id=1 を参照しているため削除できない
-DELETE FROM products WHERE id = 1;
--- ERROR: update or delete on table "products" violates foreign key constraint...
-```
-
-**対処法：** 先に子テーブルの参照行を削除するか、論理削除を使う。
-
-```sql
--- OK：先に子テーブルの行を削除
-DELETE FROM orders WHERE product_id = 1;
-DELETE FROM products WHERE id = 1;
-```
-
-### ミス3：UPDATE で SET を忘れる
-
-```sql
--- NG：文法エラー
-UPDATE products
-price = 180       -- SET が抜けている
-WHERE id = 1;
-```
-
-**対処法：** `UPDATE テーブル SET 列=値 WHERE 条件` の順番を覚える。
-
-### ミス4：RETURNING を付けたまま本番実行して結果を確認し忘れる
-
-RETURNING を付けて実行すると、更新結果が返ってきます。  
-「結果を見て問題があった」と気づいてもすでに COMMIT 済みのことがあります。  
-必ず BEGIN → 実行 → RETURNING で確認 → COMMIT の順番を守りましょう。
-
-### ミス5：論理削除のフィルタを忘れる
-
-```sql
--- NG：deleted_at IS NULL がないため削除済みも含む
-SELECT * FROM products WHERE category = '果物';
-```
-
-**対処法：** ビューを作成して論理削除フィルタを一元化する。
-
----
-
-## 13. PRレビューのチェックポイント
-
-### UPDATE / DELETE の安全確認
-
-- [ ] **WHERE 句がない UPDATE / DELETE になっていないか**
-  - WHERE 句なしは全行対象になる。意図的な全件操作でもコメントで明示する
-- [ ] **UPDATE / DELETE の前に SELECT で対象行数を確認する手順があるか**
-  - 本番手動実行時は「SELECT → BEGIN → DML → 確認 → COMMIT」の手順を必ず踏む
-- [ ] **大量行の UPDATE / DELETE をトランザクション1つで実行しようとしていないか**
-  - ロック時間とロールバック時間を考慮してバッチ処理に分割する
-
-### 論理削除・物理削除
-
-- [ ] **DELETE を使っている箇所が本当に物理削除すべきデータか確認したか**
-  - 監査・トレーサビリティが必要なテーブルには論理削除を使う
-- [ ] **論理削除テーブルへの SELECT に `deleted_at IS NULL` フィルタが入っているか**
-
-### UPSERT / RETURNING
-
-- [ ] **DO NOTHING と DO UPDATE の選択が要件と一致しているか**
-  - 競合時に既存データを保持したいのか上書きしたいのかを明確にする
-- [ ] **RETURNING 句を使う場合、アプリ側で結果を受け取る処理があるか**
-
----
-
-## 14. まとめ
+## 13. まとめ
 
 | テーマ | 要点 |
 | --- | --- |
-| UPDATE 基本 | `UPDATE テーブル SET 列=値 WHERE 条件` WHERE 必須 |
-| WHERE なし UPDATE | 全行が更新される。本番で絶対に避ける |
-| 複数列更新 | SET 句にカンマ区切りで複数列を指定 |
-| UPDATE ... FROM | 別テーブルを参照した更新。PostgreSQL 拡張 |
-| RETURNING 句 | 更新後の値を取得できる。追加 SELECT が不要 |
-| DELETE 基本 | `DELETE FROM テーブル WHERE 条件` WHERE 必須 |
-| WHERE なし DELETE | 全行が削除される。本番で絶対に避ける |
-| DELETE ... USING | 別テーブルを参照した削除 |
-| TRUNCATE vs DELETE | TRUNCATE は高速。ロールバック可否はDBに依存 |
-| 事故防止パターン | SELECT で確認 → BEGIN → DML → SELECT で確認 → COMMIT |
-| 論理削除 | deleted_at = NOW() でフラグ管理。ビューで透過的にフィルタ |
-| よくあるミス | WHERE 忘れ / 外部キー制約 / 論理削除フィルタ忘れ |
+| VIEWとは | SELECTに名前をつけて保存した仮想テーブル。データは持たない |
+| CREATE VIEW | `CREATE VIEW 名前 AS SELECT ...` |
+| CREATE OR REPLACE | 既存VIEWを更新（列の削除・型変更は不可） |
+| VIEWのメリット | 複雑クエリの再利用・セキュリティ（列/行の隠蔽）|
+| 更新可能VIEW | JOIN/GROUP BY/集計なしのシンプルなVIEWのみ更新可能 |
+| DROP VIEW | `CASCADE` は依存先も削除するため慎重に使う |
+| マテリアライズドビュー | 結果をディスクに保存。高速だが手動REFRESHが必要 |
+| REFRESH | `REFRESH MATERIALIZED VIEW [CONCURRENTLY]` で更新 |
+| 使いすぎの危険 | VIEWのネストが深いと実行時に巨大クエリになりパフォーマンス低下 |
+| よくあるミス | SELECT *使用・更新不可VIEWへのUPDATE・CASCADE削除 |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS products (
+  id       INTEGER PRIMARY KEY,
+  name     TEXT    NOT NULL,
+  category TEXT    NOT NULL,
+  price    INTEGER NOT NULL,
+  stock    INTEGER NOT NULL DEFAULT 0
+);
+DELETE FROM products;
+INSERT INTO products (id, name, category, price, stock) VALUES
+  (1, 'りんご',     '果物', 150, 20),
+  (2, 'みかん',     '果物', 100,  0),
+  (3, 'にんじん',   '野菜',  80, 50),
+  (4, 'キャベツ',   '野菜', 120,  0),
+  (5, 'バナナ',     '果物', 200, 10),
+  (6, 'ほうれん草', '野菜', 130,  0);
+```
+
+### 問題1: VIEW の作成と活用
+
+> 参照：[1. VIEWとは（仮想テーブル）](#1-viewとは仮想テーブル) ・ [2. CREATE VIEW の構文](#2-create-view-の構文)
+
+在庫が 0 の商品を返す VIEW `out_of_stock` を作成し、その VIEW からカテゴリ別の件数を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+-- VIEWの作成
+CREATE VIEW out_of_stock AS
+SELECT id, name, category, price
+FROM products
+WHERE stock = 0;
+
+-- VIEWを使った集計
+SELECT category, COUNT(*) AS count
+FROM out_of_stock
+GROUP BY category;
+```
+
+**解説：** VIEW はクエリを保存した仮想テーブルです。毎回 `WHERE stock = 0` を書く代わりに `out_of_stock` を参照するだけで同じ結果が得られます。データは保持していないため、参照するたびに元テーブルから動的に取得します。
+
+</details>
+
+### 問題2: VIEW の定義変更
+
+> 参照：[3. CREATE OR REPLACE VIEW](#3-create-or-replace-view)
+
+問題1で作成した `out_of_stock` VIEW に `stock` カラムも含めるよう変更してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+CREATE OR REPLACE VIEW out_of_stock AS
+SELECT id, name, category, price, stock
+FROM products
+WHERE stock = 0;
+```
+
+**解説：** `CREATE OR REPLACE VIEW` で既存の VIEW を上書きできます。`DROP VIEW` → `CREATE VIEW` と書いても同じですが、`CREATE OR REPLACE` はアトミックに置き換えるため依存するクエリが一瞬でも壊れません。
+
+</details>
+
+### 問題3: MATERIALIZED VIEW の作成とリフレッシュ
+
+> 参照：[8. マテリアライズドビュー（MATERIALIZED VIEW）の概念](#8-マテリアライズドビューmaterialized-viewの概念) ・ [9. マテリアライズドビューのリフレッシュ（REFRESH MATERIALIZED VIEW）](#9-マテリアライズドビューのリフレッシュrefresh-materialized-view)
+
+カテゴリ別の商品数と平均価格を保持する MATERIALIZED VIEW `category_stats` を作成し、products テーブルに変更があった後にリフレッシュしてください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+-- MATERIALIZED VIEWの作成
+CREATE MATERIALIZED VIEW category_stats AS
+SELECT
+  category,
+  COUNT(*)        AS product_count,
+  AVG(price)      AS avg_price
+FROM products
+GROUP BY category;
+
+-- データ更新後にリフレッシュ
+REFRESH MATERIALIZED VIEW category_stats;
+```
+
+**解説：** MATERIALIZED VIEW は通常の VIEW と異なり、クエリ結果を実際にディスクに保存します。そのため高速に読み取れますが、元テーブルが更新されても自動で反映されません。`REFRESH MATERIALIZED VIEW` を手動または定期的に実行して最新化します。集計が重い場合のレポート用途に適しています。
+
+</details>

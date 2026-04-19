@@ -437,15 +437,15 @@ CREATE TABLE student_courses (
 
 ---
 
-## 9. PRレビューのチェックポイント
+## 9. ポイント
 
-- [ ] **多対多の関係が中間テーブルで表現されているか**
+- **多対多の関係が中間テーブルで表現されているか**
   - ERD で直接多対多になっている場合は設計の見直しが必要
-- [ ] **1対1の関係で別テーブルに分けた理由が明確か**
+- **1対1の関係で別テーブルに分けた理由が明確か**
   - 「なんとなく分けた」ではなく、NULL が多い列を分離するなど明確な理由があるか
-- [ ] **外部キー制約が ERD の関係線と一致しているか**
+- **外部キー制約が ERD の関係線と一致しているか**
   - DDL を見て ERD の関係が制約として表現されているか確認
-- [ ] **ERD が最新の DB スキーマと一致しているか**
+- **ERD が最新の DB スキーマと一致しているか**
   - 「ERD は DB のスキーマから逆リバース生成が可能な状態を維持する」が理想
 
 ---
@@ -463,3 +463,128 @@ CREATE TABLE student_courses (
 | IE記法 | 鳥の足記法。○（0）│（1）<（多）の組み合わせで表現 |
 | ERDツール | draw.io・A5:SQL Mk-2・dbdiagram.io が現場でよく使われる |
 | よくある間違い | 粒度が粗すぎる（詰め込み）・細かすぎる・中間テーブルの属性忘れ |
+
+---
+
+## 練習問題
+
+### 問題1: ERD の読み取り
+
+> 参照：[3. カーディナリティ](#3-カーディナリティ1対1・1対多・多対多) ・ [4. IE記法の読み方](#4-ie記法鳥の足記法の読み方)
+
+以下の ERD の記述を読んで、テーブル間の関係を日本語で説明してください。
+
+```
+users ||--o{ orders : "places"
+orders ||--|{ order_items : "contains"
+products ||--o{ order_items : "included in"
+```
+
+<details>
+<summary>回答を見る</summary>
+
+- **users → orders**：1人のユーザーは0件以上の注文を持つ（ユーザーは注文なしでも存在できる）
+- **orders → order_items**：1件の注文は1件以上の注文明細を持つ（注文には必ず最低1つの商品が含まれる）
+- **products → order_items**：1つの商品は0件以上の注文明細に含まれる（一度も売れていない商品が存在できる）
+
+**解説：** IE記法では `||`（必ず1）、`o{`（0以上）、`|{`（1以上）の組み合わせでカーディナリティを表します。`orders ||--|{` は「注文は必ず1件以上の明細を持つ」という業務ルールを表現しています。
+
+</details>
+
+### 問題2: ERD の作成
+
+> 参照：[6. ERDを書く練習](#6-erdを書く練習要件から起こす手順)
+
+以下の要件から ER 図（テーブル名・カラム名・関係）を設計してください。
+
+> ブログシステム：ユーザーが記事を投稿できる。記事にはタグを複数付けられる。ユーザーは記事にコメントできる。
+
+<details>
+<summary>回答を見る</summary>
+
+**テーブル設計：**
+
+```
+users
+- id (PK)
+- name
+- email
+
+articles
+- id (PK)
+- user_id (FK → users.id)  -- 投稿者
+- title
+- body
+- created_at
+
+tags
+- id (PK)
+- name
+
+article_tags（中間テーブル）
+- article_id (FK → articles.id)
+- tag_id (FK → tags.id)
+- PK: (article_id, tag_id)
+
+comments
+- id (PK)
+- article_id (FK → articles.id)
+- user_id (FK → users.id)  -- コメント投稿者
+- body
+- created_at
+```
+
+**関係：**
+- users 1 --< articles（1人が複数記事を書く）
+- users 1 --< comments（1人が複数コメントを書く）
+- articles 1 --< comments（1記事に複数コメント）
+- articles >--< tags（多対多：中間テーブル article_tags）
+
+**解説：** 多対多（記事 ↔ タグ）は中間テーブルで表現します。コメントは「記事」と「書いたユーザー」の両方に外部キーを持つため、両方への FK が必要です。
+
+</details>
+
+### 問題3: ERD の問題点の指摘
+
+> 参照：[8. よくある間違い](#8-よくある間違い)
+
+以下のテーブル設計の問題点を指摘してください。
+
+```sql
+CREATE TABLE orders (
+  id           BIGSERIAL PRIMARY KEY,
+  customer_name TEXT,        -- 顧客名を直接保存
+  customer_email TEXT,       -- 顧客メールを直接保存
+  product_name TEXT,         -- 商品名を直接保存
+  product_price INTEGER,     -- 商品価格を直接保存
+  quantity      INTEGER
+);
+```
+
+<details>
+<summary>回答を見る</summary>
+
+**問題点：**
+
+1. **顧客情報の冗長化**：同じ顧客が複数回注文すると `customer_name` が何度も重複保存される。顧客のメールアドレスが変わっても過去の注文データは更新されない（更新異常）
+
+2. **商品情報の冗長化**：商品の価格が変更されても過去の注文レコードは古い価格のまま（これは意図的な履歴保持と解釈する場合もあるが、設計として明示が必要）
+
+3. **外部キーがない**：顧客や商品を削除しても注文テーブルに不整合データが残る
+
+**改善版の方針：**
+```sql
+-- customers, products テーブルを別に持ち、外部キーで参照
+-- 注文時の価格は order_items に unit_price として保持（履歴として必要）
+CREATE TABLE order_items (
+  id          BIGSERIAL PRIMARY KEY,
+  order_id    BIGINT NOT NULL REFERENCES orders(id),
+  product_id  BIGINT NOT NULL REFERENCES products(id),
+  unit_price  NUMERIC(10,2) NOT NULL,  -- 注文時点の価格を記録
+  quantity    INTEGER NOT NULL
+);
+```
+
+**解説：** テーブルを正規化して顧客・商品を独立したテーブルに分離します。注文時点の価格だけは `order_items` に履歴として保持することが多いです（商品テーブルの現在価格と別に管理）。
+
+</details>

@@ -1,449 +1,520 @@
-# INSERT と UPSERT
-データを挿入するINSERTと、競合時に更新するUPSERT（INSERT ON CONFLICT）を学びます
+# CTE（WITH句）
+WITH句で複雑なクエリを分解して読みやすくし、再帰CTEでツリー構造を扱います
 
 ## 本章の目標
 
 本章では以下を目標にして学習します。
 
-- INSERT の基本構文で1行・複数行のデータを挿入できること
-- 列を省略した場合の挙動（DEFAULT・NULL）を理解できること
-- INSERT INTO ... SELECT ... で別テーブルからデータをコピーできること
-- RETURNING 句で挿入した行の値を受け取れること
-- UPSERT（INSERT ON CONFLICT）で「あれば更新、なければ挿入」を実装できること
-- EXCLUDED を使って競合した行の値を参照できること
+- WITH句を使ってクエリを読みやすく分解できること
+- 複数のCTEを連鎖させて複雑な処理を段階的に書けること
+- CTEとサブクエリ・VIEWの違いを理解して使い分けられること
+- 再帰CTEを使って組織ツリーやカテゴリ階層を扱えること
+- 無限再帰を防ぐための制限を書けること
 
 ---
 
-## 1. INSERT の基本構文
+## 1. CTEとは（Common Table Expression）
 
-INSERT 文はテーブルに新しい行を追加します。
+### CTEの概念
+
+**CTE（Common Table Expression：共通テーブル式）**は、クエリの中で一時的に名前付きの結果セットを定義する仕組みです。`WITH` キーワードを使って書くため「WITH句」とも呼ばれます。
+
+イメージとしては「作業用の一時テーブルに名前をつけて、その後のSELECTで使い回す」感じです。料理で例えると、「下ごしらえした食材に名前をつけて保管しておき、後で使う」ようなものです。
+
+```sql
+-- テーブル準備
+CREATE TABLE employees (
+    emp_id      INT PRIMARY KEY,
+    emp_name    TEXT,
+    department  TEXT,
+    salary      INT,
+    manager_id  INT
+);
+
+INSERT INTO employees VALUES
+    (1, '社長 山田',   '経営', 1000000, NULL),
+    (2, '部長 鈴木',   '開発', 700000,  1),
+    (3, '部長 田中',   '営業', 680000,  1),
+    (4, '課長 佐藤',   '開発', 550000,  2),
+    (5, '課長 伊藤',   '開発', 530000,  2),
+    (6, '一般 渡辺',   '開発', 400000,  4),
+    (7, '一般 中村',   '営業', 380000,  3),
+    (8, '一般 小林',   '営業', 360000,  3);
+```
+
+---
+
+## 2. 基本的なCTE構文（WITH name AS (...)）
+
+### CTEの書き方
+
+```sql
+-- 基本構文
+WITH cte名 AS (
+    -- ここにSQLを書く
+    SELECT ...
+)
+SELECT *
+FROM cte名;
+```
+
+```sql
+-- 実例: 高給与社員のみを抽出するCTE
+WITH high_salary_employees AS (
+    SELECT emp_id, emp_name, department, salary
+    FROM employees
+    WHERE salary >= 500000
+)
+SELECT *
+FROM high_salary_employees
+ORDER BY salary DESC;
+```
+
+```sql
+-- CTEを複数回参照する例
+WITH dept_stats AS (
+    SELECT
+        department,
+        AVG(salary) AS avg_salary,
+        MAX(salary) AS max_salary,
+        COUNT(*)    AS emp_count
+    FROM employees
+    GROUP BY department
+)
+SELECT
+    department,
+    avg_salary,
+    max_salary,
+    emp_count
+FROM dept_stats
+WHERE avg_salary > 500000;
+```
+
+> **ポイント**  
+> CTEは `WITH` から始まり、最後に必ず `SELECT`（または `INSERT`/`UPDATE`/`DELETE`）が続きます。CTEの定義だけでは何も実行されません。
+
+---
+
+## 3. CTEを使うメリット（可読性・再利用性）
+
+### サブクエリと比べての違い
+
+```sql
+-- サブクエリで書いた場合（ネストが深くて読みにくい）
+SELECT
+    d.department,
+    d.avg_salary,
+    e.emp_name
+FROM (
+    SELECT department, AVG(salary) AS avg_salary
+    FROM employees
+    GROUP BY department
+) d
+INNER JOIN employees e ON e.department = d.department
+WHERE e.salary > d.avg_salary
+ORDER BY d.department, e.salary DESC;
+
+-- CTEで書いた場合（段階的で読みやすい）
+WITH dept_avg AS (
+    SELECT department, AVG(salary) AS avg_salary
+    FROM employees
+    GROUP BY department
+)
+SELECT
+    da.department,
+    da.avg_salary,
+    e.emp_name,
+    e.salary
+FROM dept_avg da
+INNER JOIN employees e ON e.department = da.department
+WHERE e.salary > da.avg_salary
+ORDER BY da.department, e.salary DESC;
+```
+
+> **ポイント**  
+> CTEを使うと「まず部門別平均を計算し、次にその平均より高い社員を探す」という処理の意図が段階的に読み取れます。コードレビューや後の保守がしやすくなります。
+
+---
+
+## 4. 複数CTEの連鎖
+
+### 複数のCTEを定義して組み合わせる
+
+複数のCTEをカンマで区切って定義でき、後のCTEで前のCTEを参照できます。
+
+```sql
+WITH
+-- ステップ1: 部門別の統計を計算
+dept_stats AS (
+    SELECT
+        department,
+        AVG(salary) AS avg_salary,
+        COUNT(*)    AS emp_count
+    FROM employees
+    GROUP BY department
+),
+-- ステップ2: 平均給与でランキング
+dept_ranked AS (
+    SELECT
+        department,
+        avg_salary,
+        emp_count,
+        RANK() OVER (ORDER BY avg_salary DESC) AS salary_rank
+    FROM dept_stats
+),
+-- ステップ3: 上位2部門のみ取得
+top_departments AS (
+    SELECT *
+    FROM dept_ranked
+    WHERE salary_rank <= 2
+)
+-- 最終結果を取得
+SELECT
+    td.department,
+    td.avg_salary,
+    td.emp_count,
+    e.emp_name,
+    e.salary
+FROM top_departments td
+INNER JOIN employees e ON e.department = td.department
+ORDER BY td.salary_rank, e.salary DESC;
+```
+
+> **ポイント**  
+> 複数CTEは `WITH` の中でカンマ区切りで書きます。後から定義したCTEは前のCTEを参照できますが、前のCTEが後のCTEを参照することはできません（順方向のみ）。
+
+---
+
+## 5. CTE vs サブクエリ（どちらを使うべきか）
+
+### 使い分けの基準
+
+```sql
+-- 【サブクエリが適している場面】
+-- シンプルな1回だけの条件フィルタ
+SELECT emp_name
+FROM employees
+WHERE salary > (SELECT AVG(salary) FROM employees);
+
+-- 【CTEが適している場面】
+-- 同じ集計結果を複数回参照する場合
+WITH avg_salary AS (
+    SELECT AVG(salary) AS avg FROM employees
+)
+SELECT
+    emp_name,
+    salary,
+    salary - (SELECT avg FROM avg_salary) AS diff  -- CTEを参照
+FROM employees
+WHERE salary > (SELECT avg FROM avg_salary);       -- 同じCTEを再利用
+```
+
+| 比較項目 | サブクエリ | CTE |
+|----------|------------|-----|
+| 書き方 | クエリ内にネスト | WITH句で先に定義 |
+| 可読性 | ネストが深いと読みにくい | 段階的で読みやすい |
+| 再利用 | 同じ内容を何度も書く必要がある | 同一CTEを複数箇所で参照できる |
+| デバッグ | 部分的な確認が難しい | CTEを個別に実行して確認できる |
+| パフォーマンス | DBによって最適化される | DBによって最適化される |
+
+> **ポイント**  
+> 複雑なクエリ、複数回参照する集計、段階的な処理にはCTEが向いています。シンプルな1回限りの条件にはサブクエリで十分です。迷ったらCTEを使う方が後の保守が楽になることが多いです。
+
+> **現場メモ**  
+> CTEを学ぶと「今まで苦労して書いていたクエリがこんなにシンプルになるのか」と感動するエンジニアが多いです。筆者が研修で一番「わかりやすかった」と言われたのもCTEの「段階的に処理を書いていける」という特性です。実務では特に「集計クエリのデバッグ」にCTEが役立ちます。WITH句の各ブロックを個別に SELECT して中間結果を確認できるため、「どのステップで行数がおかしくなっているか」を素早く特定できます。レポートやバッチ処理のような複雑なSQLを書く際は、最初からCTEで各処理を分けて書くことをお勧めします。
+
+---
+
+## 6. CTE vs VIEW（一時的か永続的か）
+
+### VIEWとの違い
+
+```sql
+-- VIEW: データベースに保存される永続的な仮想テーブル
+CREATE VIEW high_salary_view AS
+SELECT emp_id, emp_name, salary
+FROM employees
+WHERE salary >= 500000;
+
+-- 作成後は何度でも参照できる
+SELECT * FROM high_salary_view;
+
+-- CTE: クエリの実行中のみ存在する一時的なもの
+WITH high_salary_cte AS (
+    SELECT emp_id, emp_name, salary
+    FROM employees
+    WHERE salary >= 500000
+)
+SELECT * FROM high_salary_cte;  -- このクエリが終わるとCTEも消える
+```
+
+| 比較項目 | CTE | VIEW |
+|----------|-----|------|
+| 保存場所 | クエリ内（一時的） | データベース（永続的） |
+| スコープ | 1つのクエリの中のみ | どこからでも参照可能 |
+| 変更 | クエリを書き換えるだけ | ALTER/DROP VIEWが必要 |
+| 権限管理 | なし | VIEWに権限を付与できる |
+| 再帰 | WITH RECURSIVE が使える | 通常のVIEWは再帰不可 |
+
+> **ポイント**  
+> 「このクエリの中だけで使う一時的な整理」にはCTE、「チームで共有して繰り返し使うクエリ」にはVIEWが向いています。VIEWの詳細はlesson12で学びます。
+
+---
+
+## 7. 再帰CTE（WITH RECURSIVE）の概念
+
+### 再帰CTEとは
+
+**再帰CTE**は、CTE自身が自分自身を参照することで、階層構造（ツリー）を繰り返し辿る仕組みです。組織ツリー、カテゴリ階層、ファイルシステムなどのデータを扱うときに非常に強力です。
+
+イメージとしては「数字を1から10まで順番に数える」ときに「前の数字に1を足す」という操作を繰り返すような感覚です。
+
+再帰CTEは必ず2つの部分から構成されます：
+1. **アンカー部分**：再帰の起点（最初の行）
+2. **再帰部分**：前の結果を使って次の行を生成する
+
+---
+
+## 8. 再帰CTEの構文（アンカー部分 + 再帰部分）
 
 ### 基本構文
 
 ```sql
-INSERT INTO テーブル名 (列1, 列2, 列3)
-VALUES (値1, 値2, 値3);
+WITH RECURSIVE cte_name AS (
+    -- アンカー部分（再帰の起点）
+    SELECT ...初期値...
+
+    UNION ALL
+
+    -- 再帰部分（cte_nameを参照して次の行を生成）
+    SELECT ...
+    FROM cte_name
+    WHERE ...終了条件...
+)
+SELECT * FROM cte_name;
 ```
 
-### 例：商品テーブルへの挿入
-
-まず本章で使うサンプルテーブルを用意します。
+### 1から10までの数字を生成する例
 
 ```sql
--- 商品テーブル
-CREATE TABLE products (
-    id          SERIAL PRIMARY KEY,
-    code        TEXT UNIQUE NOT NULL,
-    name        TEXT NOT NULL,
-    price       INTEGER NOT NULL DEFAULT 0,
-    stock       INTEGER NOT NULL DEFAULT 0,
-    category    TEXT,
-    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
-);
+WITH RECURSIVE numbers AS (
+    -- アンカー: 最初の値
+    SELECT 1 AS n
 
--- 在庫ログテーブル
-CREATE TABLE stock_logs (
-    id          SERIAL PRIMARY KEY,
-    product_id  INTEGER NOT NULL REFERENCES products(id),
-    change      INTEGER NOT NULL,
-    reason      TEXT,
-    logged_at   TIMESTAMP NOT NULL DEFAULT NOW()
-);
+    UNION ALL
+
+    -- 再帰: 前の値に1を足す
+    SELECT n + 1
+    FROM numbers
+    WHERE n < 10  -- 終了条件（これがないと無限ループ！）
+)
+SELECT n FROM numbers;
 ```
 
-```sql
--- 列を明示して1行挿入
-INSERT INTO products (code, name, price, stock, category)
-VALUES ('APPLE-001', 'りんご', 150, 100, '果物');
-```
-
-> **ポイント**  
-> 列名を明示して INSERT するのがベストプラクティスです。  
-> テーブルに後から列が追加されても INSERT 文が壊れにくくなります。
-
----
-
-## 2. 列を省略した場合の挙動
-
-INSERT 時に列名を省略すると、定義された列の順番通りに値が割り当てられます。
+### 組織ツリーを辿る再帰CTE
 
 ```sql
--- 列名を省略した書き方（テーブルの全列に対して順番に値を指定）
-INSERT INTO products
-VALUES (DEFAULT, 'BANANA-001', 'バナナ', 120, 50, '果物', DEFAULT, DEFAULT);
-```
+-- 社長（id=1）から全部下を取得する
+WITH RECURSIVE org_tree AS (
+    -- アンカー: 社長から始める
+    SELECT
+        emp_id,
+        emp_name,
+        manager_id,
+        0 AS depth,           -- 階層の深さ
+        emp_name AS path      -- 所属パス
+    FROM employees
+    WHERE emp_id = 1          -- 社長のIDを指定
 
-| 状況 | 挿入される値 |
-|------|-------------|
-| DEFAULT が指定されている列を省略 | DEFAULT 値が使われる |
-| DEFAULT のない列を省略 | NULL が入る（NOT NULL 制約があればエラー） |
-| SERIAL / GENERATED 列を省略 | 自動採番される |
+    UNION ALL
 
-```sql
--- category を省略（NULL が入る）
-INSERT INTO products (code, name, price)
-VALUES ('GRAPE-001', 'ぶどう', 300);
--- category は NULL、stock は DEFAULT の 0、created_at/updated_at は DEFAULT の NOW()
-```
-
-> **注意**  
-> NOT NULL 制約があり DEFAULT も指定されていない列を省略するとエラーになります。  
-> `ERROR: null value in column "name" of relation "products" violates not-null constraint`  
-> 必ず必須列は明示的に指定しましょう。
-
----
-
-## 3. 複数行の INSERT
-
-VALUES に複数組の値を書くことで、1つの INSERT 文で複数行を挿入できます。
-
-```sql
--- 複数行を一度に挿入
-INSERT INTO products (code, name, price, stock, category)
-VALUES
-    ('MANGO-001',   'マンゴー',   500, 30, '果物'),
-    ('ORANGE-001',  'オレンジ',   100, 80, '果物'),
-    ('SPINACH-001', 'ほうれん草',  80, 60, '野菜'),
-    ('CARROT-001',  'にんじん',    60, 90, '野菜');
-```
-
-### 1行ずつ INSERT するのと複数行 INSERT の違い
-
-| 方法 | ネットワーク往復 | パフォーマンス |
-|------|----------------|--------------|
-| 1行ずつ（ループ）| N 回 | 遅い |
-| 複数行まとめて | 1回 | 速い |
-
-> **ポイント**  
-> アプリケーションから大量データを挿入する場合は、ループで1件ずつ INSERT するより  
-> 複数行まとめた INSERT の方が大幅に速くなります。  
-> ただし VALUES の数が非常に多い場合は分割して送ることを検討してください。
-
----
-
-## 4. INSERT INTO ... SELECT ...
-
-別テーブルや同じテーブルから SELECT した結果をそのまま挿入できます。
-
-```sql
--- 別テーブルからコピー
-CREATE TABLE products_backup (LIKE products INCLUDING ALL);
-
-INSERT INTO products_backup
-SELECT * FROM products;
-```
-
-```sql
--- 条件付きでコピー（果物カテゴリだけ別テーブルに移す）
-CREATE TABLE fruits (
-    id       SERIAL PRIMARY KEY,
-    code     TEXT UNIQUE NOT NULL,
-    name     TEXT NOT NULL,
-    price    INTEGER NOT NULL DEFAULT 0,
-    stock    INTEGER NOT NULL DEFAULT 0
-);
-
-INSERT INTO fruits (code, name, price, stock)
-SELECT code, name, price, stock
-FROM products
-WHERE category = '果物';
-```
-
-```sql
--- 集計結果を別テーブルに保存する（データウェアハウスでよく使うパターン）
-CREATE TABLE daily_summary (
-    summary_date  DATE,
-    category      TEXT,
-    total_stock   INTEGER,
-    total_value   BIGINT
-);
-
-INSERT INTO daily_summary (summary_date, category, total_stock, total_value)
+    -- 再帰: 直属の部下を追加していく
+    SELECT
+        e.emp_id,
+        e.emp_name,
+        e.manager_id,
+        ot.depth + 1,
+        ot.path || ' > ' || e.emp_name  -- パスを連結
+    FROM employees e
+    INNER JOIN org_tree ot ON e.manager_id = ot.emp_id
+)
 SELECT
-    CURRENT_DATE           AS summary_date,
-    category,
-    SUM(stock)             AS total_stock,
-    SUM(stock * price)     AS total_value
-FROM products
-WHERE category IS NOT NULL
-GROUP BY category;
+    emp_id,
+    REPEAT('  ', depth) || emp_name AS indented_name,  -- インデントで階層表現
+    depth,
+    path
+FROM org_tree
+ORDER BY path;
 ```
 
+**結果イメージ**
+
+| emp_id | indented_name     | depth | path                           |
+|--------|-------------------|-------|--------------------------------|
+| 1      | 社長 山田         | 0     | 社長 山田                      |
+| 2      | 　部長 鈴木       | 1     | 社長 山田 > 部長 鈴木           |
+| 3      | 　部長 田中       | 1     | 社長 山田 > 部長 田中           |
+| 4      | 　　課長 佐藤     | 2     | 社長 山田 > 部長 鈴木 > 課長 佐藤 |
+
 > **ポイント**  
-> `INSERT INTO ... SELECT ...` は、ETL処理（データ変換・集約）やバックアップ作成に  
-> よく使われるパターンです。SELECT 部分には GROUP BY や JOIN も使えます。
+> `WITH RECURSIVE` は、同じCTEを自己参照するため **UNION ALL** で接続します。アンカー部分が最初の行を生成し、再帰部分が終了条件を満たすまで繰り返し実行されます。
 
 ---
 
-## 5. RETURNING 句
+## 9. 再帰CTEの使い所（組織ツリー・カテゴリ階層）
 
-INSERT 後に挿入された行の値を取得できます。  
-特に SERIAL や GENERATED カラムの自動採番値を受け取るときに便利です。
+### カテゴリ階層の展開
 
 ```sql
--- 挿入した行の id を取得する
-INSERT INTO products (code, name, price, stock, category)
-VALUES ('STRAW-001', 'いちご', 250, 40, '果物')
-RETURNING id;
+CREATE TABLE categories (
+    cat_id    INT PRIMARY KEY,
+    cat_name  TEXT,
+    parent_id INT
+);
+
+INSERT INTO categories VALUES
+    (1, '全商品',   NULL),
+    (2, '食品',     1),
+    (3, '電子機器', 1),
+    (4, '野菜',     2),
+    (5, '果物',     2),
+    (6, 'スマホ',   3),
+    (7, 'PC',       3),
+    (8, 'にんじん', 4),
+    (9, 'りんご',   5);
+
+-- 「果物」カテゴリ以下の全商品を取得
+WITH RECURSIVE cat_tree AS (
+    -- アンカー: 「果物」から始める
+    SELECT cat_id, cat_name, parent_id, 0 AS depth
+    FROM categories
+    WHERE cat_name = '果物'
+
+    UNION ALL
+
+    -- 再帰: 子カテゴリを追加
+    SELECT c.cat_id, c.cat_name, c.parent_id, ct.depth + 1
+    FROM categories c
+    INNER JOIN cat_tree ct ON c.parent_id = ct.cat_id
+)
+SELECT cat_id, cat_name, depth
+FROM cat_tree
+ORDER BY depth, cat_id;
 ```
 
-実行結果：
-
-| id |
-|----|
-| 6  |
+### 祖先を辿る（下から上へ）
 
 ```sql
--- 複数列を RETURNING する
-INSERT INTO products (code, name, price, stock, category)
-VALUES ('WATER-001', 'スイカ', 800, 15, '果物')
-RETURNING id, code, name, created_at;
-```
+-- 「一般 渡辺」（id=6）から社長までの経路を辿る
+WITH RECURSIVE ancestors AS (
+    SELECT emp_id, emp_name, manager_id
+    FROM employees
+    WHERE emp_id = 6  -- 渡辺から開始
 
-実行結果：
+    UNION ALL
 
-| id | code       | name   | created_at          |
-|----|------------|--------|---------------------|
-| 7  | WATER-001  | スイカ | 2024-03-01 10:00:00 |
-
-```sql
--- 全列を返す
-INSERT INTO products (code, name, price)
-VALUES ('MELON-001', 'メロン', 1200)
-RETURNING *;
+    SELECT e.emp_id, e.emp_name, e.manager_id
+    FROM employees e
+    INNER JOIN ancestors a ON e.emp_id = a.manager_id
+)
+SELECT emp_id, emp_name
+FROM ancestors;
 ```
 
 > **ポイント**  
-> アプリケーション側で INSERT 直後に `lastInsertId` 的な値が必要な場合、  
-> RETURNING id を使えば追加の SELECT が不要です。  
-> パフォーマンス的にも優れており、PostgreSQL では積極的に使いましょう。
+> 再帰CTEは「子から親方向」も「親から子方向」も自在に辿れます。JOINの向きを変えるだけで両方向の探索が可能です。
 
 ---
 
-## 6. シーケンスの currval / nextval
+## 10. よくあるミス（無限再帰の防止）
 
-PostgreSQL の SERIAL 型は内部的にシーケンスを使っています。  
-シーケンスを直接操作することもできます。
+### ミス1: 終了条件を書き忘れる
 
 ```sql
--- 次の値を取得して進める（INSERT と同様の効果）
-SELECT nextval('products_id_seq');
+-- 危険な例: WHERE条件なしで無限ループ
+-- WITH RECURSIVE infinite AS (
+--     SELECT 1 AS n
+--     UNION ALL
+--     SELECT n + 1 FROM infinite  -- 永遠に増え続ける！
+-- )
+-- SELECT * FROM infinite;
 
--- 現在のシーケンス値を確認（同一セッション内で nextval を呼んだ後のみ有効）
-SELECT currval('products_id_seq');
-
--- シーケンス名を確認する
-SELECT pg_get_serial_sequence('products', 'id');
--- 結果例: public.products_id_seq
+-- 正しい例: 必ず終了条件を書く
+WITH RECURSIVE safe AS (
+    SELECT 1 AS n
+    UNION ALL
+    SELECT n + 1 FROM safe WHERE n < 100  -- 100で止まる
+)
+SELECT * FROM safe;
 ```
 
+### ミス2: 循環参照データでの無限ループ
+
 ```sql
--- INSERT 後に currval で id を取得（RETURNING の方が推奨）
-INSERT INTO products (code, name, price) VALUES ('TEST-001', 'テスト', 100);
-SELECT currval('products_id_seq');
+-- データに循環がある場合（A→B→C→A のような参照）は無限ループになる
+-- 対策: 訪問済みIDを配列で追跡する
+WITH RECURSIVE safe_traverse AS (
+    SELECT emp_id, manager_id, ARRAY[emp_id] AS visited
+    FROM employees
+    WHERE emp_id = 1
+
+    UNION ALL
+
+    SELECT e.emp_id, e.manager_id, st.visited || e.emp_id
+    FROM employees e
+    INNER JOIN safe_traverse st ON e.manager_id = st.emp_id
+    WHERE NOT (e.emp_id = ANY(st.visited))  -- 訪問済みは除外
+)
+SELECT emp_id FROM safe_traverse;
+```
+
+### ミス3: UNION と UNION ALL の間違い
+
+```sql
+-- 再帰CTEではUNION ALL を使う（UNION は各ステップで重複除去するため遅い）
+-- また、論理的に重複がない場合はUNION ALLで問題ない
+WITH RECURSIVE tree AS (
+    SELECT emp_id, emp_name, 0 AS depth FROM employees WHERE emp_id = 1
+    UNION ALL  -- UNION（ALL なし）にすると毎回重複チェックが走って遅くなる
+    SELECT e.emp_id, e.emp_name, t.depth + 1
+    FROM employees e INNER JOIN tree t ON e.manager_id = t.emp_id
+)
+SELECT * FROM tree;
+```
+
+### PostgreSQLの再帰深度制限
+
+```sql
+-- デフォルトでは再帰深度に制限がある
+-- 深いツリーを辿る場合は設定を変更するか、終了条件を確認する
+-- PostgreSQLでは max_recursive_depth のような設定はないが、
+-- WHEREの終了条件で深さを制限するのが一般的
+WITH RECURSIVE bounded_tree AS (
+    SELECT emp_id, emp_name, 0 AS depth FROM employees WHERE emp_id = 1
+    UNION ALL
+    SELECT e.emp_id, e.emp_name, t.depth + 1
+    FROM employees e
+    INNER JOIN bounded_tree t ON e.manager_id = t.emp_id
+    WHERE t.depth < 10  -- 最大10階層まで
+)
+SELECT * FROM bounded_tree;
 ```
 
 > **注意**  
-> `currval` は同一セッション内で `nextval` を呼んだ後でないと使えません。  
-> 別セッションでの INSERT とは独立しており、自分のセッションで最後に発行した値を返します。  
-> 実務では **RETURNING 句** を使う方がシンプルで安全です。
+> 再帰CTEで無限ループが発生するとクエリが終わらなくなります。必ず終了条件を書き、データに循環参照がある場合は訪問済みチェックを追加しましょう。開発中は `WHERE depth < 5` のように浅い制限で動作を確認してから条件を調整するのが安全です。
 
 ---
 
-## 7. UPSERT（INSERT ON CONFLICT）の概念と使い所
+## 11. ポイント
 
-**UPSERT** とは「INSERT」と「UPDATE」を組み合わせた造語で、  
-「レコードがなければ挿入、あれば更新」という処理です。
-
-### なぜ UPSERT が必要か？
-
-たとえば「商品コードをユニークキーとして在庫を管理するテーブル」があるとします。  
-同じ商品コードで INSERT すると UNIQUE 制約違反になります。
-
-```sql
--- これは2回目にエラーになる
-INSERT INTO products (code, name, price) VALUES ('APPLE-001', 'りんご', 150);
--- ERROR: duplicate key value violates unique constraint "products_code_key"
-```
-
-UPSERT を使えば、「既存ならスキップ or 更新」とシームレスに処理できます。
-
-> **ポイント**  
-> UPSERT の典型的な使い所：  
-> - 外部システムからのデータ同期（あれば更新、なければ挿入）  
-> - 設定値のセーブ（ユーザーIDでユニークな設定テーブル）  
-> - 集計バッファの日次更新
-
-> **現場メモ**  
-> UPSERTは便利ですが「DO NOTHINGにすべきかDO UPDATEにすべきか」の判断ミスによるバグが現場では発生します。例えば「ユーザーの最終ログイン時刻を更新したい」のにDO NOTHINGにしていたせいで初回以降のログイン時刻が更新されなかった、という事故がありました。逆に「初回登録日を上書きしたくない」のにDO UPDATEにしてしまい、再登録のたびに登録日が書き換わる問題も起きています。「競合した場合に何をしたいか」を明確にしてからDO NOTHING / DO UPDATEを選んでください。また、複数行をUPSERTするときに一部だけ競合する場合の挙動も確認しておくことをお勧めします。
-
----
-
-## 8. INSERT ON CONFLICT DO NOTHING
-
-競合が発生した場合、エラーを出さずに何もしない（スキップする）パターンです。
-
-```sql
--- UNIQUE 制約（code 列）違反になった場合は何もしない
-INSERT INTO products (code, name, price, stock, category)
-VALUES ('APPLE-001', 'りんご', 150, 100, '果物')
-ON CONFLICT (code) DO NOTHING;
-```
-
-- 新規レコードの場合：挿入される
-- code='APPLE-001' が既に存在する場合：何も起きない（エラーなし）
-
-```sql
--- DO NOTHING で複数行の一括 INSERT も安全になる
-INSERT INTO products (code, name, price, stock, category)
-VALUES
-    ('APPLE-001', 'りんご',  150, 100, '果物'),  -- 既存：スキップ
-    ('KIWI-001',  'キウイ',  200,  25, '果物')   -- 新規：挿入
-ON CONFLICT (code) DO NOTHING;
-```
-
-> **ポイント**  
-> DO NOTHING はべき等な INSERT（何度実行しても同じ結果になる処理）を  
-> 実現するのに便利です。  
-> バッチ処理や再実行可能なマイグレーションスクリプトでよく使われます。
-
----
-
-## 9. INSERT ON CONFLICT DO UPDATE SET（競合時の更新）
-
-競合が発生した場合に、既存レコードを更新するパターンです。
-
-```sql
--- price と stock を最新値に更新する UPSERT
-INSERT INTO products (code, name, price, stock, category)
-VALUES ('APPLE-001', 'りんご', 180, 120, '果物')
-ON CONFLICT (code)
-DO UPDATE SET
-    price      = 180,
-    stock      = 120,
-    updated_at = NOW();
-```
-
-```sql
--- 主キーの競合を対象にする場合は ON CONFLICT (id)
-INSERT INTO products (id, code, name, price, stock)
-VALUES (1, 'APPLE-001', 'りんご', 180, 120)
-ON CONFLICT (id)
-DO UPDATE SET
-    price = 180,
-    stock = 120;
-```
-
-> **ポイント**  
-> `ON CONFLICT (列名)` の列には UNIQUE 制約または主キーが必要です。  
-> 通常の列（制約なし）は指定できません。
-
----
-
-## 10. EXCLUDED（競合した行の値を参照する）
-
-DO UPDATE SET 内では `EXCLUDED` というキーワードを使って、  
-「今回 INSERT しようとした（競合した）行の値」を参照できます。
-
-```sql
--- EXCLUDED を使って INSERT しようとした値をそのまま UPDATE に使う
-INSERT INTO products (code, name, price, stock, category)
-VALUES ('APPLE-001', 'りんご', 180, 120, '果物')
-ON CONFLICT (code)
-DO UPDATE SET
-    price      = EXCLUDED.price,      -- INSERT しようとした価格
-    stock      = EXCLUDED.stock,      -- INSERT しようとした在庫
-    name       = EXCLUDED.name,       -- INSERT しようとした名前
-    category   = EXCLUDED.category,
-    updated_at = NOW();
-```
-
-### 条件付き更新（価格が下がったときだけ更新する）
-
-```sql
--- 価格が安くなった場合のみ更新する
-INSERT INTO products (code, name, price, stock, category)
-VALUES ('APPLE-001', 'りんご', 130, 100, '果物')
-ON CONFLICT (code)
-DO UPDATE SET
-    price      = EXCLUDED.price,
-    updated_at = NOW()
-WHERE products.price > EXCLUDED.price;   -- 現在価格 > 新しい価格のときのみ
-```
-
-### 在庫を加算する
-
-```sql
--- 在庫を上書きするのではなく、競合時は加算する
-INSERT INTO products (code, name, price, stock, category)
-VALUES ('APPLE-001', 'りんご', 150, 50, '果物')
-ON CONFLICT (code)
-DO UPDATE SET
-    stock      = products.stock + EXCLUDED.stock,  -- 既存在庫 + 追加在庫
-    updated_at = NOW();
-```
-
-`products.stock` は「既存の値」、`EXCLUDED.stock` は「INSERT しようとした値」を指します。
-
-> **ポイント**  
-> EXCLUDED を使うと、INSERT 時に指定した値を DO UPDATE 側でも再利用できます。  
-> ハードコードを避けられるため、カラムが増えても保守しやすいコードになります。
-
----
-
-## 11. よくあるミス
-
-### ミス1：列名を省略して列数の不一致エラー
-
-```sql
--- NG：列数が合わない
-INSERT INTO products VALUES ('APPLE-001', 'りんご', 150);
--- ERROR: INSERT has more target columns than expressions
-```
-
-**対処法：** 列名を明示するか、テーブルの全列分の値を指定する。
-
-```sql
--- OK：列名を明示
-INSERT INTO products (code, name, price)
-VALUES ('APPLE-001', 'りんご', 150);
-```
-
-### ミス2：UNIQUE 制約違反を DO NOTHING と思ったら DO UPDATE だった（逆も然り）
-
-DO NOTHING と DO UPDATE は目的が異なります。  
-- 「2重登録を防ぎたいだけ」→ DO NOTHING  
-- 「最新データで上書きしたい」→ DO UPDATE SET
-
-### ミス3：ON CONFLICT に制約のない列を指定する
-
-```sql
--- NG：category には UNIQUE 制約がない
-INSERT INTO products (code, name, price, category)
-VALUES ('APPLE-001', 'りんご', 150, '果物')
-ON CONFLICT (category) DO NOTHING;
--- ERROR: there is no unique or exclusion constraint matching the ON CONFLICT specification
-```
-
-**対処法：** ON CONFLICT に指定できるのは UNIQUE 制約か主キーの列のみ。
-
-### ミス4：INSERT の値の型が違う
-
-```sql
--- NG：price は INTEGER なのに文字列を入れる
-INSERT INTO products (code, name, price)
-VALUES ('APPLE-001', 'りんご', '百五十円');
--- ERROR: invalid input syntax for type integer: "百五十円"
-```
-
-**対処法：** 数値型の列には数値を渡す。文字列から変換が必要なら `CAST` か `::` を使う。
-
-```sql
--- OK
-INSERT INTO products (code, name, price)
-VALUES ('APPLE-001', 'りんご', '150'::INTEGER);
-```
+- **3段以上のネストしたサブクエリがあれば CTE への書き換えを提案する**
+  - ネストが深いほどデバッグが難しく、レビューでの意図把握も困難になる
+- **同じサブクエリを複数箇所で繰り返し書いていないか**
+  - CTE に切り出して1箇所で定義する
+- **再帰 CTE に LIMIT / `max_recursion_depth` の対策があるか**
+  - 循環参照データや終了条件の漏れで無限ループになる可能性を確認
+- **複雑な CTE を書いた場合、各ステップを単独で実行して中間結果を確認したか**
+  - CTE のデバッグ方法としてブロックを個別に SELECT する手順を知っているか
 
 ---
 
@@ -451,14 +522,139 @@ VALUES ('APPLE-001', 'りんご', '150'::INTEGER);
 
 | テーマ | 要点 |
 | --- | --- |
-| INSERT 基本構文 | `INSERT INTO テーブル (列...) VALUES (値...)` 列名を明示するのが安全 |
-| 列の省略 | DEFAULT 値が入る。DEFAULT がなく NOT NULL なら挿入エラー |
-| 複数行 INSERT | VALUES に複数組を指定。ループより高速でオススメ |
-| INSERT ... SELECT | SELECT 結果をそのまま挿入。ETL・バックアップに活用 |
-| RETURNING 句 | 挿入した行の値（自動採番 id など）を取得できる |
-| currval / nextval | シーケンスの現在値・次値を取得する。RETURNING の方が推奨 |
-| UPSERT の概念 | INSERT + UPDATE。「なければ挿入、あれば更新」 |
-| DO NOTHING | 競合時にスキップ。べき等な INSERT に便利 |
-| DO UPDATE SET | 競合時に既存行を更新。更新列を明示的に指定する |
-| EXCLUDED | INSERT しようとした行の値を参照するキーワード |
-| よくあるミス | 列数不一致 / 制約のない列への ON CONFLICT / 型の不一致 |
+| CTEとは | WITH句で定義する一時的な名前付き結果セット |
+| 基本構文 | `WITH name AS (SELECT ...) SELECT * FROM name` |
+| メリット | 複雑なクエリを段階的に分解して可読性を上げる |
+| 複数CTE | カンマ区切りで複数定義可能。後のCTEは前のCTEを参照できる |
+| CTE vs サブクエリ | 複雑・複数回参照にはCTE、シンプルな1回にはサブクエリ |
+| CTE vs VIEW | CTEは一時的（クエリ内のみ）、VIEWは永続的（DB保存） |
+| 再帰CTEの仕組み | アンカー部分（起点）+ UNION ALL + 再帰部分 |
+| 再帰CTEの用途 | 組織ツリー・カテゴリ階層・パス探索 |
+| 無限再帰の防止 | 必ず終了条件（WHERE depth < N）を書く |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS employees (
+  emp_id     INTEGER PRIMARY KEY,
+  emp_name   TEXT    NOT NULL,
+  department TEXT    NOT NULL,
+  salary     INTEGER NOT NULL,
+  manager_id INTEGER
+);
+DELETE FROM employees;
+INSERT INTO employees (emp_id, emp_name, department, salary, manager_id) VALUES
+  (1, '社長 山田', '経営', 1000000, NULL),
+  (2, '部長 鈴木', '開発',  700000,    1),
+  (3, '部長 田中', '営業',  680000,    1),
+  (4, '課長 佐藤', '開発',  550000,    2),
+  (5, '課長 伊藤', '開発',  530000,    2),
+  (6, '一般 渡辺', '開発',  400000,    4),
+  (7, '一般 中村', '営業',  380000,    3),
+  (8, '一般 小林', '営業',  360000,    3);
+
+CREATE TABLE IF NOT EXISTS categories (
+  cat_id    INTEGER PRIMARY KEY,
+  cat_name  TEXT    NOT NULL,
+  parent_id INTEGER
+);
+DELETE FROM categories;
+INSERT INTO categories (cat_id, cat_name, parent_id) VALUES
+  (1, '全商品',   NULL),
+  (2, '食品',        1),
+  (3, '電子機器',    1),
+  (4, '野菜',        2),
+  (5, '果物',        2),
+  (6, 'スマホ',      3),
+  (7, 'PC',          3);
+```
+
+### 問題1: CTE で部署別平均を計算して平均以上を抽出
+
+> 参照：[2. 基本的なCTE構文（WITH name AS (...)）](#2-基本的なcte構文with-name-as) ・ [3. CTEを使うメリット（可読性・再利用性）](#3-cteを使うメリット可読性・再利用性)
+
+CTE を使って部署ごとの平均給与を計算し、自分の部署平均以上の給与をもらっている社員を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+WITH dept_avg AS (
+  SELECT department, AVG(salary) AS avg_salary
+  FROM employees
+  GROUP BY department
+)
+SELECT e.emp_name, e.department, e.salary
+FROM employees AS e
+JOIN dept_avg AS d ON e.department = d.department
+WHERE e.salary >= d.avg_salary;
+```
+
+**解説：** CTE（`WITH dept_avg`）で部署別平均を一度計算し、本体クエリで JOIN して比較します。サブクエリを FROM 句に埋め込むより可読性が高く、同じ中間結果を複数箇所で使い回せます。
+
+</details>
+
+### 問題2: 再帰 CTE でカテゴリの階層展開
+
+> 参照：[7. 再帰CTE（WITH RECURSIVE）の概念](#7-再帰ctewith-recursiveの概念) ・ [8. 再帰CTEの構文（アンカー部分 + 再帰部分）](#8-再帰cteの構文アンカー部分-再帰部分)
+
+`categories` テーブルを再帰 CTE で展開し、各カテゴリの名前とルートからの階層レベルを取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+WITH RECURSIVE category_tree AS (
+  -- アンカー: ルートノード
+  SELECT cat_id, cat_name, parent_id, 0 AS depth
+  FROM categories
+  WHERE parent_id IS NULL
+
+  UNION ALL
+
+  -- 再帰: 子ノードを追加
+  SELECT c.cat_id, c.cat_name, c.parent_id, ct.depth + 1
+  FROM categories AS c
+  JOIN category_tree AS ct ON c.parent_id = ct.cat_id
+)
+SELECT cat_name, depth
+FROM category_tree
+ORDER BY depth, cat_name;
+```
+
+**解説：** 再帰 CTE は「アンカー（基底ケース）」と「再帰部分」を `UNION ALL` でつなぎます。アンカーでルート（parent_id IS NULL）を取得し、再帰部分で親の cat_id を子の parent_id と一致させながら展開します。`depth` を +1 ずつ増やすことで階層レベルを記録できます。
+
+</details>
+
+### 問題3: 複数 CTE の連鎖
+
+> 参照：[4. 複数CTEの連鎖](#4-複数cteの連鎖)
+
+2つの CTE を定義して、「管理職（manager_id が他の社員の emp_id に存在する人）の部署ごとの平均給与」を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+WITH managers AS (
+  SELECT DISTINCT manager_id AS emp_id
+  FROM employees
+  WHERE manager_id IS NOT NULL
+),
+manager_salaries AS (
+  SELECT e.department, e.salary
+  FROM employees AS e
+  JOIN managers AS m ON e.emp_id = m.emp_id
+)
+SELECT department, AVG(salary) AS avg_salary
+FROM manager_salaries
+GROUP BY department;
+```
+
+**解説：** 複数の CTE はカンマで区切って定義でき、後の CTE から前の CTE を参照できます。`managers` で管理職の emp_id を特定し、`manager_salaries` でその給与データを取得、最後に部署別平均を計算します。
+
+</details>

@@ -496,15 +496,15 @@ name VARCHAR(100) NOT NULL
 > **ポイント**  
 > 「このカラムがNULLになることはビジネス的にあり得るか？」を必ず考えてください。NULLが混入すると、アプリ側でのNULLチェックが増え、予期せぬバグの温床になります。
 
-## PRレビューのチェックポイント
+## ポイント
 
-- [ ] **本番で実行するマイグレーションに `ALTER COLUMN TYPE` や全行検証が必要な変更が含まれていないか**
+- **本番で実行するマイグレーションに `ALTER COLUMN TYPE` や全行検証が必要な変更が含まれていないか**
   - ロックリスクの高い操作は `NOT VALID` オプションや段階的手順での回避を検討する
-- [ ] **マイグレーションを本番と同じデータ量の環境で事前に計測したか**
+- **マイグレーションを本番と同じデータ量の環境で事前に計測したか**
   - ステージング環境でも本番データ量を模擬しないと見落とす
-- [ ] **`DROP TABLE` や `TRUNCATE` を本番で実行する際に確認手順があるか**
+- **`DROP TABLE` や `TRUNCATE` を本番で実行する際に確認手順があるか**
   - 実行前に `SELECT COUNT(*)` で対象を必ず確認する
-- [ ] **シーケンスの `START WITH` 値が既存データと衝突しないか（データ移行時）**
+- **シーケンスの `START WITH` 値が既存データと衝突しないか（データ移行時）**
   - 既存の最大 ID より大きい値を `START WITH` に設定する
 
 ---
@@ -522,3 +522,109 @@ name VARCHAR(100) NOT NULL
 | TRUNCATE vs DELETE | 全件削除はTRUNCATEが速い。DELETEはWHERE句で絞れる |
 | SERIAL/IDENTITY | シーケンスの糖衣構文。新規プロジェクトはIDENTITYカラム推奨 |
 | よくあるミス | ENUM使いすぎ・外部キーのインデックス忘れ・TIMESTAMPTZの使い忘れ |
+
+---
+
+## 練習問題
+
+### 問題1: テーブル定義の修正
+
+> 参照：[2. 実践的なCREATE TABLE例](#2-実践的なcreate-table例)
+
+以下のテーブル定義を見て問題点を指摘し、改善版を書いてください。
+
+```sql
+CREATE TABLE orders (
+  id INT,
+  user_id INT,
+  total FLOAT,
+  status VARCHAR(10),
+  created TIMESTAMP
+);
+```
+
+<details>
+<summary>回答を見る</summary>
+
+**問題点：**
+1. `id` に PRIMARY KEY がない
+2. `id` が SERIAL でなく自動採番されない
+3. `total` が FLOAT（浮動小数点誤差）→ 金額には不適
+4. `user_id` に NOT NULL も外部キーもない
+5. `created` が TIMESTAMP（タイムゾーンなし）→ TIMESTAMPTZ が推奨
+
+**改善版：**
+```sql
+CREATE TABLE orders (
+  id         BIGSERIAL PRIMARY KEY,
+  user_id    BIGINT NOT NULL REFERENCES users(id),
+  total      NUMERIC(10, 2) NOT NULL,
+  status     TEXT NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+**解説：** 実務的なテーブル定義には「主キー・外部キー・NOT NULL・適切な型・デフォルト値」が揃っている必要があります。`created` → `created_at` のように命名も慣例に合わせると可読性が上がります。
+
+</details>
+
+### 問題2: カラムの追加と変更
+
+> 参照：[3. ALTER TABLE](#3-alter-table)
+
+既存の `products` テーブルに以下の変更を加えてください。
+
+1. `description TEXT` カラムを追加する
+2. `price` カラムの型を `INTEGER` から `NUMERIC(10,2)` に変更する
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+-- カラムの追加
+ALTER TABLE products ADD COLUMN description TEXT;
+
+-- 型の変更
+ALTER TABLE products ALTER COLUMN price TYPE NUMERIC(10, 2);
+```
+
+**解説：** `ALTER TABLE` でテーブル構造を変更します。カラム追加はデータに影響しません。型の変更は既存データが変換できる場合のみ成功します（INTEGER → NUMERIC は安全、TEXT → INTEGER は変換できない値があれば失敗）。本番テーブルで型変更をする際はバックアップと動作確認が必須です。
+
+</details>
+
+### 問題3: TRUNCATE と DELETE の使い分け
+
+> 参照：[6. TRUNCATE vs DELETE の違い](#6-truncate-vs-delete-の違い)
+
+以下のシナリオで `TRUNCATE` と `DELETE` のどちらを使うべきか答えてください。
+
+1. テスト環境の全データを初期化したい
+2. ユーザーID=5 のデータだけを削除したい
+3. 本番環境の1年以上前のログを削除したい（ロールバック可能にしたい）
+
+<details>
+<summary>回答を見る</summary>
+
+| シナリオ | 推奨 | 理由 |
+|----------|------|------|
+| 1 | `TRUNCATE` | 全件削除は TRUNCATE が高速。WHERE 句不要 |
+| 2 | `DELETE WHERE` | 条件を指定して一部削除するには DELETE |
+| 3 | `DELETE WHERE` | トランザクション内で実行してロールバック可能にする。TRUNCATE もトランザクション内で使えるが DELETE の方が安全 |
+
+```sql
+-- 1
+TRUNCATE orders RESTART IDENTITY;
+
+-- 2
+DELETE FROM users WHERE id = 5;
+
+-- 3
+BEGIN;
+DELETE FROM access_logs WHERE created_at < NOW() - INTERVAL '1 year';
+-- 件数を確認してからCOMMIT
+COMMIT;
+```
+
+**解説：** `TRUNCATE` は全件削除に特化しており、ページ単位でデータを削除するため非常に高速です。`RESTART IDENTITY` を付けるとシーケンス（SERIAL の連番）もリセットできます。
+
+</details>

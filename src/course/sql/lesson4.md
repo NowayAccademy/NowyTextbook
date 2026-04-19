@@ -435,14 +435,14 @@ JOIN temp_target_ids t ON c.id = t.id;
 
 ---
 
-## 12. PRレビューのチェックポイント
+## 12. ポイント
 
-- [ ] `LIKE '%keyword%'` の部分一致を大量データに使っていないか（インデックスが効かない）
-- [ ] `NOT IN (SELECT ...)` パターンを使っていないか（NULLが混入すると全件除外になる）
-- [ ] `IN` のリストが動的に増える可能性がある場合、上限を考慮しているか
-- [ ] `BETWEEN` の日付範囲でTIMESTAMP型の月末（23:59:59）が漏れていないか
-- [ ] `ILIKE` を使う場合、他DBへの移植性を考慮しているか（PostgreSQL専用）
-- [ ] 検索機能の件数が将来大幅に増えてもパフォーマンスが維持できるか
+- `LIKE '%keyword%'` の部分一致を大量データに使っていないか（インデックスが効かない）
+- `NOT IN (SELECT ...)` パターンを使っていないか（NULLが混入すると全件除外になる）
+- `IN` のリストが動的に増える可能性がある場合、上限を考慮しているか
+- `BETWEEN` の日付範囲でTIMESTAMP型の月末（23:59:59）が漏れていないか
+- `ILIKE` を使う場合、他DBへの移植性を考慮しているか（PostgreSQL専用）
+- 検索機能の件数が将来大幅に増えてもパフォーマンスが維持できるか
 
 ---
 
@@ -460,3 +460,89 @@ JOIN temp_target_ids t ON c.id = t.id;
 | 日付の BETWEEN | TIMESTAMP型は範囲の終端に注意が必要 |
 | EXISTS | サブクエリが1件以上返すかを確認する |
 | NOT EXISTS | NULL の問題を回避できる NOT IN の代替 |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS customers (
+  id      INTEGER PRIMARY KEY,
+  name    TEXT    NOT NULL,
+  email   TEXT    NOT NULL,
+  address TEXT
+);
+DELETE FROM customers;
+INSERT INTO customers (id, name, email, address) VALUES
+  (1, '田中太郎', 'tanaka@gmail.com',    '東京都新宿区'),
+  (2, '鈴木花子', 'suzuki@yahoo.co.jp',  '大阪府大阪市'),
+  (3, '佐藤一郎', 'sato@gmail.com',      '東京都渋谷区'),
+  (4, '山田次郎', 'yamada@example.com',  '神奈川県横浜市'),
+  (5, '田中三郎', 'tanaka2@gmail.com',   '東京都品川区');
+```
+
+### 問題1: 前方一致検索
+
+> 参照：[1. LIKE とワイルドカード](#1-like-とワイルドカード-と)
+
+`name` が `'田中'` で始まる顧客の `name` と `email` を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT name, email
+FROM customers
+WHERE name LIKE '田中%';
+```
+
+**解説：** `%` は0文字以上の任意の文字列にマッチします。`'田中%'` は「田中」で始まる文字列全体に一致します。結果は田中太郎・田中三郎です。
+
+</details>
+
+### 問題2: 複数値の絞り込みと部分一致
+
+> 参照：[1. LIKE とワイルドカード](#1-like-とワイルドカード-と)
+
+`address` に `'東京都'` を含み、かつ `email` が `'gmail.com'` で終わる顧客の `name` を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT name
+FROM customers
+WHERE address LIKE '%東京都%'
+  AND email LIKE '%gmail.com';
+```
+
+**解説：** `LIKE '%東京都%'` は「東京都」を任意の位置に含む文字列にマッチします。AND で2条件を組み合わせると、東京都在住かつ Gmail ユーザーの田中太郎・佐藤一郎・田中三郎が返ります。
+
+</details>
+
+### 問題3: IN と NOT IN
+
+> 参照：[5. IN / NOT IN の使い方](#5-in-not-in-の使い方) ・ [6. IN に NULL が含まれる時の落とし穴](#6-in-に-null-が含まれる時の落とし穴)
+
+`id` が `1`, `3`, `5` の顧客の `name` を取得してください。また、それ以外の顧客も確認してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+-- 対象の顧客
+SELECT name
+FROM customers
+WHERE id IN (1, 3, 5);
+
+-- それ以外の顧客
+SELECT name
+FROM customers
+WHERE id NOT IN (1, 3, 5);
+```
+
+**解説：** `IN (値1, 値2, ...)` は複数の `OR` をまとめた書き方です。`NOT IN` は逆の条件になります。ただし `NOT IN` のリストに NULL が含まれると結果が空になるので注意が必要です。
+
+</details>

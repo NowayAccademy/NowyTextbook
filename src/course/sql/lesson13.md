@@ -1,638 +1,595 @@
-# ウィンドウ関数
-OVER句・ROW_NUMBER・RANK・LAG/LEAD・集計OVERでデータを分析します
+# サブクエリ
+スカラーサブクエリ・FROM句サブクエリ・相関サブクエリを使いこなします
 
 ## 本章の目標
 
 本章では以下を目標にして学習します。
 
-- ウィンドウ関数とGROUP BYの違いを説明できること
-- PARTITION BY・ORDER BY in OVERを使って分析クエリを書けること
-- ROW_NUMBER・RANK・DENSE_RANKで順位付けができること
-- LAG・LEADで前後の行の値を参照できること
-- SUM/AVG OVERで累計・移動平均を計算できること
-- ROWSフレーム指定で集計範囲を細かく指定できること
+- サブクエリの種類（スカラー・インラインビュー・相関）を理解できること
+- WHERE句でサブクエリを使って条件を動的に指定できること
+- FROM句にサブクエリを書いて派生テーブルとして利用できること
+- 相関サブクエリでEXISTSを使った効率的な絞り込みができること
+- サブクエリとJOINの使い分けを判断できること
 
 ---
 
-## 1. ウィンドウ関数とは（GROUP BYとの違い）
+## 1. サブクエリとは（クエリの中のクエリ）
 
-### ウィンドウ関数の概念
+### サブクエリの基本概念
 
-**ウィンドウ関数**は、「**各行を残しながら**、その行の周辺（ウィンドウ）の情報を使って計算する」関数です。
+**サブクエリ**（副問い合わせ）とは、SQLの中に別のSQLを「入れ子」にして書く手法です。外側のクエリを**メインクエリ（外部クエリ）**、内側のクエリを**サブクエリ（内部クエリ）**と呼びます。
 
-GROUP BYとの最大の違いは**行数が減らない**ことです：
-- `GROUP BY` → グループごとに1行に集約される（行が減る）
-- `ウィンドウ関数` → すべての行が残り、各行に集計結果が付け加わる
+身近な例で例えると、「先月の平均売上より多く売った営業担当者を教えて」という質問は、まず「先月の平均売上を計算する」→「その値より大きい人を探す」という2ステップになります。この2ステップを一つのSQLにまとめたものがサブクエリです。
 
 ```sql
 -- テーブル準備
-CREATE TABLE sales_data (
+CREATE TABLE sales (
     id          INT PRIMARY KEY,
     staff_name  TEXT,
-    department  TEXT,
-    sale_amount INT,
+    amount      INT,
     sale_date   DATE
 );
 
-INSERT INTO sales_data VALUES
-    (1,  '田中', '東京', 50000, '2024-01-10'),
-    (2,  '鈴木', '東京', 80000, '2024-01-15'),
-    (3,  '佐藤', '大阪', 60000, '2024-01-20'),
-    (4,  '伊藤', '大阪', 45000, '2024-01-25'),
-    (5,  '田中', '東京', 70000, '2024-02-05'),
-    (6,  '鈴木', '東京', 55000, '2024-02-10'),
-    (7,  '佐藤', '大阪', 90000, '2024-02-15'),
-    (8,  '伊藤', '大阪', 30000, '2024-02-20'),
-    (9,  '田中', '東京', 40000, '2024-03-05'),
-    (10, '鈴木', '東京', 95000, '2024-03-10');
+INSERT INTO sales VALUES
+    (1, '田中', 50000, '2024-03-01'),
+    (2, '鈴木', 80000, '2024-03-05'),
+    (3, '田中', 30000, '2024-03-10'),
+    (4, '佐藤', 120000, '2024-03-15'),
+    (5, '鈴木', 40000, '2024-03-20'),
+    (6, '佐藤', 90000, '2024-03-25');
 
--- GROUP BY: 部署ごとに集約（行が減る）
-SELECT department, SUM(sale_amount) AS total
-FROM sales_data
-GROUP BY department;
-
--- ウィンドウ関数: 各行が残り、合計が付く（行が減らない）
-SELECT
-    staff_name,
-    department,
-    sale_amount,
-    SUM(sale_amount) OVER (PARTITION BY department) AS dept_total
-FROM sales_data;
+-- 平均売上額より大きい取引を取得
+SELECT staff_name, amount
+FROM sales
+WHERE amount > (SELECT AVG(amount) FROM sales);  -- これがサブクエリ
 ```
 
 > **ポイント**  
-> ウィンドウ関数はSELECT句の中に `関数名() OVER (...)` の形で書きます。OVER句が「どの範囲（ウィンドウ）で計算するか」を指定します。
+> サブクエリは `( )` の中に書きます。内側のクエリが先に実行され、その結果を外側のクエリが利用します。
 
 ---
 
-## 2. OVER句の基本（パーティションとオーダー）
+## 2. スカラーサブクエリ（1行1列を返す）
 
-### OVER句の構文
+### スカラーサブクエリとは
+
+**スカラーサブクエリ**は、**必ず1行1列（ひとつの値）**を返すサブクエリです。数値や文字列のような「スカラー値」を返すため、列の値と直接比較したり、SELECT句に書いたりできます。
 
 ```sql
-関数名() OVER (
-    PARTITION BY 列名    -- グループ分け（省略可）
-    ORDER BY 列名        -- ウィンドウ内の並び順（省略可）
-    ROWS BETWEEN ...     -- フレーム範囲（省略可）
+-- SELECT句にスカラーサブクエリを書く例
+-- 各取引の金額と全体平均を一緒に表示
+SELECT
+    staff_name,
+    amount,
+    (SELECT AVG(amount) FROM sales) AS avg_amount,
+    amount - (SELECT AVG(amount) FROM sales) AS diff_from_avg
+FROM sales
+ORDER BY amount DESC;
+```
+
+```sql
+-- WHERE句でスカラーサブクエリを比較演算子と組み合わせる
+-- 最大売上額と同じ金額の取引を取得
+SELECT staff_name, amount
+FROM sales
+WHERE amount = (SELECT MAX(amount) FROM sales);
+```
+
+> **注意**  
+> スカラーサブクエリが2行以上を返すとエラーになります。`MAX`、`MIN`、`AVG`、`COUNT`、`SUM` などの集計関数を使うか、`LIMIT 1` を付けて確実に1行にしましょう。
+
+---
+
+## 3. WHERE句のサブクエリ（IN/NOT IN との組み合わせ）
+
+### INと組み合わせて複数値と比較する
+
+スカラーサブクエリは1値との比較でしたが、**IN**を使うと「サブクエリが返す複数の値のいずれかに一致する行」を取得できます。
+
+```sql
+-- 商品テーブルと注文テーブル
+CREATE TABLE products (
+    product_id   INT PRIMARY KEY,
+    product_name TEXT,
+    category     TEXT
+);
+
+CREATE TABLE order_items (
+    item_id    INT PRIMARY KEY,
+    product_id INT,
+    quantity   INT
+);
+
+INSERT INTO products VALUES
+    (1, 'りんご', '果物'),
+    (2, 'みかん', '果物'),
+    (3, 'にんじん', '野菜'),
+    (4, 'キャベツ', '野菜'),
+    (5, 'バナナ', '果物');
+
+INSERT INTO order_items VALUES
+    (1, 1, 3), (2, 3, 5), (3, 5, 2);
+
+-- 注文されたことがある商品の情報を取得
+SELECT product_id, product_name
+FROM products
+WHERE product_id IN (
+    SELECT product_id FROM order_items
+);
+```
+
+### NOT INで「存在しない」ものを検索
+
+```sql
+-- 一度も注文されていない商品を取得
+SELECT product_id, product_name
+FROM products
+WHERE product_id NOT IN (
+    SELECT product_id FROM order_items
+);
+```
+
+> **注意**  
+> `NOT IN` はサブクエリの結果にNULLが含まれると**すべての行がFALSE**になり、結果が0件になります。NULLが入る可能性がある列に `NOT IN` を使う場合は `NOT EXISTS` か `LEFT JOIN + IS NULL` を使いましょう。  
+> 安全な書き方: `WHERE product_id NOT IN (SELECT product_id FROM order_items WHERE product_id IS NOT NULL)`
+
+---
+
+## 4. FROM句のサブクエリ（インラインビュー・派生テーブル）
+
+### FROM句にサブクエリを書く
+
+FROM句にサブクエリを書くと、その結果を「一時的なテーブル」として扱えます。これを**インラインビュー**または**派生テーブル**と呼びます。複雑な集計を段階的に行いたいときに便利です。
+
+```sql
+-- ステップ1: スタッフ別合計を計算
+-- ステップ2: その合計に対してさらに条件を絞る
+
+SELECT
+    staff_summary.staff_name,
+    staff_summary.total_amount
+FROM (
+    -- 内側: スタッフ別の合計を計算
+    SELECT
+        staff_name,
+        SUM(amount) AS total_amount
+    FROM sales
+    GROUP BY staff_name
+) AS staff_summary  -- 派生テーブルにはエイリアスが必須！
+WHERE staff_summary.total_amount > 100000
+ORDER BY staff_summary.total_amount DESC;
+```
+
+### なぜFROM句サブクエリが必要か
+
+```sql
+-- 悪い例: 集計結果に対して条件を使おうとしてエラー
+-- SELECT staff_name, SUM(amount) AS total
+-- FROM sales
+-- WHERE total > 100000  -- エラー! WHEREはSELECTより先に処理される
+-- GROUP BY staff_name;
+
+-- 正しい例1: HAVINGを使う
+SELECT staff_name, SUM(amount) AS total
+FROM sales
+GROUP BY staff_name
+HAVING SUM(amount) > 100000;
+
+-- 正しい例2: FROM句サブクエリを使う
+SELECT * FROM (
+    SELECT staff_name, SUM(amount) AS total
+    FROM sales
+    GROUP BY staff_name
+) sub
+WHERE total > 100000;
+```
+
+> **ポイント**  
+> PostgreSQLでは、FROM句のサブクエリには必ずエイリアス（AS sub など）をつける必要があります。名前をつけないとエラーになります。
+
+---
+
+## 5. 相関サブクエリ（外側のクエリを参照する）
+
+### 相関サブクエリとは
+
+これまでのサブクエリは内側だけで完結していましたが、**相関サブクエリ**は**外側のクエリの値を参照して実行される**サブクエリです。外側の各行に対してサブクエリが1回ずつ実行されます。
+
+```sql
+-- 各スタッフの最高売上額を取得する相関サブクエリ
+SELECT
+    s1.staff_name,
+    s1.amount,
+    s1.sale_date
+FROM sales s1
+WHERE s1.amount = (
+    -- 外側のs1.staff_nameを参照している（相関）
+    SELECT MAX(s2.amount)
+    FROM sales s2
+    WHERE s2.staff_name = s1.staff_name  -- ここで外側を参照
 )
-```
-
-```sql
--- OVER()だけ（全行を対象）
-SELECT
-    staff_name,
-    sale_amount,
-    SUM(sale_amount) OVER () AS grand_total  -- 全行の合計
-FROM sales_data;
-
--- PARTITION BY だけ（グループ内合計）
-SELECT
-    staff_name,
-    department,
-    sale_amount,
-    SUM(sale_amount) OVER (PARTITION BY department) AS dept_total
-FROM sales_data;
-
--- ORDER BY だけ（累計）
-SELECT
-    id,
-    sale_date,
-    sale_amount,
-    SUM(sale_amount) OVER (ORDER BY sale_date) AS running_total
-FROM sales_data;
-```
-
----
-
-## 3. PARTITION BY（グループ分け、GROUP BYとの違い）
-
-### PARTITION BYの働き
-
-`PARTITION BY` はウィンドウ関数のグループ分けを指定します。GROUP BYとは異なり、行数は減りません。
-
-```sql
--- 各行の売上と、その部署の平均売上を並べて表示
-SELECT
-    staff_name,
-    department,
-    sale_amount,
-    AVG(sale_amount) OVER (PARTITION BY department) AS dept_avg,
-    sale_amount - AVG(sale_amount) OVER (PARTITION BY department) AS diff_from_avg
-FROM sales_data
-ORDER BY department, sale_amount DESC;
+ORDER BY s1.staff_name;
 ```
 
 **結果イメージ**
 
-| staff_name | department | sale_amount | dept_avg | diff_from_avg |
-|------------|-----------|-------------|---------|----------------|
-| 鈴木       | 東京      | 95000       | 66000   | +29000         |
-| 鈴木       | 東京      | 80000       | 66000   | +14000         |
-| 田中       | 東京      | 70000       | 66000   | +4000          |
-| 田中       | 東京      | 50000       | 66000   | -16000         |
-| 田中       | 東京      | 40000       | 66000   | -26000         |
-| 鈴木       | 東京      | 55000       | 66000   | -11000         |
+| staff_name | amount | sale_date  |
+|------------|--------|------------|
+| 佐藤       | 120000 | 2024-03-15 |
+| 田中       | 50000  | 2024-03-01 |
+| 鈴木       | 80000  | 2024-03-05 |
 
 > **ポイント**  
-> `PARTITION BY department` は「部署ごとに別々にウィンドウを作る」指定です。東京チームの中だけで計算、大阪チームの中だけで計算という具合に、グループを分けて計算します。
+> 相関サブクエリは「外側の行を1行ずつチェックするたびに内側のクエリを実行する」イメージです。外側に100万行あれば内側も100万回実行される可能性があるため、パフォーマンスに注意が必要です。
 
 ---
 
-## 4. ORDER BY in OVER（ウィンドウ内の順序）
+## 6. 相関サブクエリとEXISTS
 
-### ウィンドウ内で順序が重要な計算
+### EXISTSの使い方
+
+**EXISTS**は「サブクエリが1件以上の結果を返すか」をチェックする演算子です。`IN` と似た用途ですが、実際の値ではなく「存在するかどうか」だけを確認するため、効率的に動作することが多いです。
 
 ```sql
--- 日付順で各スタッフの売上を並べたときの累計（スタッフ別）
-SELECT
-    staff_name,
-    sale_date,
-    sale_amount,
-    SUM(sale_amount) OVER (
-        PARTITION BY staff_name
-        ORDER BY sale_date
-    ) AS running_total_per_staff
-FROM sales_data
-ORDER BY staff_name, sale_date;
+-- 注文された商品を取得（EXISTSを使う）
+SELECT p.product_id, p.product_name
+FROM products p
+WHERE EXISTS (
+    SELECT 1  -- 何を返しても良い（1か*が慣例）
+    FROM order_items oi
+    WHERE oi.product_id = p.product_id  -- 外側を参照
+);
+```
+
+### NOT EXISTS
+
+```sql
+-- 一度も注文されていない商品を取得（NOT EXISTS）
+SELECT p.product_id, p.product_name
+FROM products p
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM order_items oi
+    WHERE oi.product_id = p.product_id
+);
+```
+
+### INとEXISTSの比較
+
+```sql
+-- IN を使う場合（小規模データには問題ない）
+SELECT product_name
+FROM products
+WHERE product_id IN (SELECT product_id FROM order_items);
+
+-- EXISTS を使う場合（大規模データにはEXISTSの方が速いことが多い）
+SELECT p.product_name
+FROM products p
+WHERE EXISTS (SELECT 1 FROM order_items oi WHERE oi.product_id = p.product_id);
 ```
 
 > **ポイント**  
-> OVER句内の `ORDER BY` はウィンドウ内での並び順を指定します。クエリ全体のORDER BYとは別物です。ウィンドウ内のORDER BYを省略すると、`SUM` や `AVG` などは全行を対象に計算されます。
+> `EXISTS` は「1件でも見つかったらTRUE」と判定するため、最初にマッチした時点でサブクエリの実行を止めます。これが `IN` より速くなる理由のひとつです。また、NULL問題もないため安全です。
 
 ---
 
-## 5. ROW_NUMBER（一意な連番）
+## 7. サブクエリとJOINの使い分け
 
-### ROW_NUMBERの使い方
-
-`ROW_NUMBER()` は各行に重複なしの連番を振ります。同じ値でも別々の番号が付くのが特徴です。
+### どちらを使うべきか
 
 ```sql
--- 全行に連番
-SELECT
-    ROW_NUMBER() OVER (ORDER BY sale_amount DESC) AS row_num,
-    staff_name,
-    sale_amount
-FROM sales_data;
+-- サブクエリで書く例
+SELECT staff_name, amount
+FROM sales
+WHERE amount > (SELECT AVG(amount) FROM sales);
 
--- 部署ごとに連番を振り直す
-SELECT
-    staff_name,
-    department,
-    sale_amount,
-    ROW_NUMBER() OVER (
-        PARTITION BY department
-        ORDER BY sale_amount DESC
-    ) AS rank_in_dept
-FROM sales_data
-ORDER BY department, rank_in_dept;
+-- JOINで書く例（集計をJOINで使う）
+SELECT s.staff_name, s.amount
+FROM sales s
+INNER JOIN (
+    SELECT AVG(amount) AS avg_amount FROM sales
+) avg_sales ON s.amount > avg_sales.avg_amount;
 ```
 
-### ROW_NUMBERで上位N件を取得する
+### 使い分けの指針
+
+| 状況 | 推奨 |
+|------|------|
+| 単純な存在チェック | EXISTS/NOT EXISTS |
+| 集計値との比較 | スカラーサブクエリ |
+| 複数の列が必要な結合 | JOIN |
+| 結果セットを結合して新しい列が欲しい | JOIN |
+| 可読性重視の複雑なクエリ | CTE（WITH句）|
 
 ```sql
--- 部署ごとに売上上位2件を取得
-WITH ranked AS (
-    SELECT
-        staff_name,
-        department,
-        sale_amount,
-        ROW_NUMBER() OVER (
-            PARTITION BY department
-            ORDER BY sale_amount DESC
-        ) AS rn
-    FROM sales_data
-)
-SELECT staff_name, department, sale_amount
-FROM ranked
-WHERE rn <= 2
-ORDER BY department, rn;
+-- JOINで書いた方が読みやすい例
+-- 顧客名と注文数を一緒に取得
+SELECT
+    c.customer_name,
+    COUNT(o.order_id) AS order_count
+FROM customers c
+LEFT JOIN orders o ON c.customer_id = o.customer_id
+GROUP BY c.customer_name;
+
+-- サブクエリで書くと複雑になる例（同じ結果）
+SELECT
+    c.customer_name,
+    (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.customer_id) AS order_count
+FROM customers c;
 ```
 
 > **ポイント**  
-> ウィンドウ関数はWHERE句で直接フィルタできません。サブクエリやCTEでウィンドウ関数を実行してから、外側のWHEREで絞り込みます。
+> 「JOIN + GROUP BY」と「相関サブクエリ」は同じ結果を返せることが多いです。一般的にJOINの方がパフォーマンス面で優れていますが、相関サブクエリの方が直感的に読める場合もあります。実行計画（EXPLAIN）で比較するのが確実です。
 
 > **現場メモ**  
-> `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)` + CTEで上位N件を取る、というパターンは実務で非常によく使います。「カテゴリごとに売上トップ3の商品を取り出す」「ユーザーごとに最新のログだけ取る」などの要件は、GROUP BY + サブクエリで書くと複雑になりますが、ROW_NUMBERを使うとシンプルに表現できます。筆者が初めてこのパターンを覚えたとき「こんな書き方があったのか」と感動しました。特に「各グループの最新レコードを1件だけ取る」（ROW_NUMBER = 1でフィルタ）は頻出パターンとして覚えておくと面接でも役立ちます。
+> 「サブクエリかJOINか」という迷いは現場でもよく出ます。筆者の判断基準は「結果の列が増えるかどうか」です。右テーブルの列も取り出したい場合はJOIN、単に絞り込みや集計値との比較だけならサブクエリ、という切り分けで大体うまくいきます。また、相関サブクエリは「読みやすいけど遅い」の代表例です。`SELECT COUNT(*) FROM orders WHERE customer_id = c.id` のような相関サブクエリを顧客テーブルの全行に対して実行すると、顧客が10万人いれば10万回クエリが走るN+1問題が起きます。「相関サブクエリを見たらEXPLAINで実行回数を確認する」を習慣にしてください。
 
 ---
 
-## 6. RANK（同率順位あり、飛び番あり）
+## 8. サブクエリのパフォーマンス注意点
 
-### RANKの特徴
-
-`RANK()` は同じ値に同じ順位を付け、次の順位を飛ばします（1, 1, 3, 4 のように）。
+### 相関サブクエリは行数が多いと遅くなる
 
 ```sql
+-- パフォーマンスが悪い例: 100万行のテーブルに相関サブクエリを使う
+-- SELECT staff_name, amount
+-- FROM sales s1
+-- WHERE amount = (SELECT MAX(amount) FROM sales s2 WHERE s2.staff_name = s1.staff_name);
+-- → 外側の行数分だけ内側が実行される
+
+-- 改善例: ウィンドウ関数を使う（lesson13で詳しく学ぶ）
 SELECT
     staff_name,
-    sale_amount,
-    RANK() OVER (ORDER BY sale_amount DESC) AS rank
-FROM sales_data
-ORDER BY rank;
-```
-
-| staff_name | sale_amount | rank |
-|------------|-------------|------|
-| 鈴木       | 95000       | 1    |
-| 佐藤       | 90000       | 2    |
-| 鈴木       | 80000       | 3    |
-| 田中       | 70000       | 4    |
-| 佐藤       | 60000       | 5    |
-| 鈴木       | 55000       | 6    |
-| 田中       | 50000       | 7    |
-| 伊藤       | 45000       | 8    |
-| 田中       | 40000       | 9    |
-| 伊藤       | 30000       | 10   |
-
-> **ポイント**  
-> `RANK()` は同値の場合に同じ順位を付け、次の順位番号を飛ばします。「1位が2人いたら、次は3位」というスポーツの順位付けと同じ挙動です。
-
----
-
-## 7. DENSE_RANK（同率順位あり、飛び番なし）
-
-### DENSE_RANKの特徴
-
-`DENSE_RANK()` は同じ値に同じ順位を付けますが、飛び番を作りません（1, 1, 2, 3 のように）。
-
-```sql
--- RANK と DENSE_RANK の違いを比較
-SELECT
-    staff_name,
-    sale_amount,
-    RANK()       OVER (ORDER BY sale_amount DESC) AS rank_num,
-    DENSE_RANK() OVER (ORDER BY sale_amount DESC) AS dense_rank_num,
-    ROW_NUMBER() OVER (ORDER BY sale_amount DESC) AS row_num
-FROM sales_data
-ORDER BY sale_amount DESC;
-```
-
-| 比較項目 | ROW_NUMBER | RANK | DENSE_RANK |
-|----------|------------|------|------------|
-| 同値の扱い | 別の番号 | 同じ番号（飛び番あり） | 同じ番号（飛び番なし） |
-| 例（同値2件後） | 1, 2, 3 | 1, 1, 3 | 1, 1, 2 |
-| 用途 | ページネーション・重複なし連番 | スポーツ順位 | カテゴリ分類・層別 |
-
-> **ポイント**  
-> どれを使うか迷ったら：重複なし連番 → `ROW_NUMBER`、同率があるスポーツ順位 → `RANK`、飛び番なしのグループ分け → `DENSE_RANK` と覚えましょう。
-
----
-
-## 8. LAG（前の行の値を参照）
-
-### LAGで前の行を見る
-
-`LAG()` は現在の行から「N行前の値」を取得します。前月比較や前日比較によく使われます。
-
-```sql
--- 各スタッフの売上と前回売上の比較
-SELECT
-    staff_name,
-    sale_date,
-    sale_amount,
-    LAG(sale_amount, 1) OVER (
-        PARTITION BY staff_name
-        ORDER BY sale_date
-    ) AS prev_amount,
-    sale_amount - LAG(sale_amount, 1) OVER (
-        PARTITION BY staff_name
-        ORDER BY sale_date
-    ) AS change_from_prev
-FROM sales_data
-ORDER BY staff_name, sale_date;
-```
-
-**結果（田中の例）**
-
-| staff_name | sale_date  | sale_amount | prev_amount | change_from_prev |
-|------------|------------|-------------|-------------|------------------|
-| 田中       | 2024-01-10 | 50000       | NULL        | NULL             |
-| 田中       | 2024-02-05 | 70000       | 50000       | +20000           |
-| 田中       | 2024-03-05 | 40000       | 70000       | -30000           |
-
-```sql
--- LAGの第3引数でNULLの代替値を指定できる
-SELECT
-    staff_name,
-    sale_date,
-    sale_amount,
-    LAG(sale_amount, 1, 0) OVER (  -- 前行がない場合は0を返す
-        PARTITION BY staff_name
-        ORDER BY sale_date
-    ) AS prev_amount
-FROM sales_data;
-```
-
-> **ポイント**  
-> `LAG(列名, N, デフォルト値)` の形で使います。Nを省略すると1行前（デフォルト1）。デフォルト値を省略するとNULLが返ります。
-
----
-
-## 9. LEAD（次の行の値を参照）
-
-### LEADで次の行を見る
-
-`LEAD()` は `LAG()` の逆で、現在の行から「N行後の値」を取得します。
-
-```sql
--- 次回の売上予定との比較
-SELECT
-    staff_name,
-    sale_date,
-    sale_amount,
-    LEAD(sale_amount, 1) OVER (
-        PARTITION BY staff_name
-        ORDER BY sale_date
-    ) AS next_amount,
-    LEAD(sale_date, 1) OVER (
-        PARTITION BY staff_name
-        ORDER BY sale_date
-    ) AS next_sale_date
-FROM sales_data
-ORDER BY staff_name, sale_date;
-```
-
-> **ポイント**  
-> `LAG` は過去を見る（前行）、`LEAD` は未来を見る（次行）です。株価チャートの「前日比」や「翌日予測との差」を計算するのによく使われます。
-
----
-
-## 10. SUM OVER（累計・移動合計）
-
-### 累計の計算
-
-```sql
--- 日付順の売上累計
-SELECT
-    sale_date,
-    sale_amount,
-    SUM(sale_amount) OVER (
-        ORDER BY sale_date
-    ) AS cumulative_total
-FROM sales_data
-ORDER BY sale_date;
-
--- 部署別の売上累計
-SELECT
-    department,
-    sale_date,
-    sale_amount,
-    SUM(sale_amount) OVER (
-        PARTITION BY department
-        ORDER BY sale_date
-    ) AS dept_cumulative
-FROM sales_data
-ORDER BY department, sale_date;
-```
-
-### 移動合計（直近N件の合計）
-
-```sql
--- 直近3件の売上合計（スタッフ別）
-SELECT
-    staff_name,
-    sale_date,
-    sale_amount,
-    SUM(sale_amount) OVER (
-        PARTITION BY staff_name
-        ORDER BY sale_date
-        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW  -- 直近3行（2個前〜現在）
-    ) AS rolling_3_sum
-FROM sales_data
-ORDER BY staff_name, sale_date;
-```
-
-> **ポイント**  
-> `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW` は「2行前から現在行まで」を意味します。移動合計や移動平均の計算に使います。
-
----
-
-## 11. AVG OVER（移動平均）
-
-### 移動平均の計算
-
-```sql
--- 全期間の累計平均
-SELECT
-    sale_date,
-    sale_amount,
-    AVG(sale_amount) OVER (
-        ORDER BY sale_date
-    ) AS cumulative_avg
-FROM sales_data
-ORDER BY sale_date;
-
--- 直近3件の移動平均
-SELECT
-    staff_name,
-    sale_date,
-    sale_amount,
-    ROUND(
-        AVG(sale_amount) OVER (
-            PARTITION BY staff_name
-            ORDER BY sale_date
-            ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
-        )
-    ) AS moving_avg_3
-FROM sales_data
-ORDER BY staff_name, sale_date;
-
--- 部署別の売上構成比（%）
-SELECT
-    staff_name,
-    department,
-    sale_amount,
-    ROUND(
-        100.0 * sale_amount / SUM(sale_amount) OVER (PARTITION BY department),
-        1
-    ) AS pct_of_dept
-FROM sales_data
-ORDER BY department, pct_of_dept DESC;
-```
-
-> **ポイント**  
-> `100.0 * sale_amount / SUM(sale_amount) OVER (PARTITION BY department)` で部署内の構成比（割合）を計算できます。GROUP BYを使わず、各行に割合が付くのがウィンドウ関数の強みです。
-
----
-
-## 12. ROWS / RANGE フレーム指定
-
-### フレームとは
-
-フレームとは「ウィンドウ内でどの行まで計算対象にするか」を細かく指定する仕組みです。
-
-```sql
--- フレーム指定の構文
-OVER (
-    PARTITION BY ...
-    ORDER BY ...
-    ROWS BETWEEN [開始位置] AND [終了位置]
-    -- または
-    RANGE BETWEEN [開始位置] AND [終了位置]
-)
-```
-
-| フレーム位置 | 意味 |
-|------------|------|
-| `UNBOUNDED PRECEDING` | パーティションの先頭行 |
-| `N PRECEDING` | 現在行のN行前 |
-| `CURRENT ROW` | 現在の行 |
-| `N FOLLOWING` | 現在行のN行後 |
-| `UNBOUNDED FOLLOWING` | パーティションの最終行 |
-
-```sql
--- 様々なフレーム指定の例
-SELECT
-    sale_date,
-    sale_amount,
-
-    -- 先頭から現在行までの累計
-    SUM(sale_amount) OVER (
-        ORDER BY sale_date
-        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS cumulative_sum,
-
-    -- 前1行・現在行・後1行の合計（中心移動合計）
-    SUM(sale_amount) OVER (
-        ORDER BY sale_date
-        ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING
-    ) AS centered_sum,
-
-    -- パーティション全体の合計
-    SUM(sale_amount) OVER (
-        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-    ) AS total_sum
-
-FROM sales_data
-ORDER BY sale_date;
-```
-
-### ROWS vs RANGE
-
-```sql
--- ROWS: 物理的な行数でフレームを決める
--- RANGE: ORDER BY列の値の範囲でフレームを決める（同値は同じフレームに入る）
-
--- 同日の売上が複数ある場合の違い
-SELECT
-    sale_date,
-    sale_amount,
-    SUM(sale_amount) OVER (ORDER BY sale_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rows_sum,
-    SUM(sale_amount) OVER (ORDER BY sale_date RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS range_sum
-FROM sales_data
-ORDER BY sale_date;
--- 同じ日付が複数あると、RANGEはその日付の全行を同じフレームとして扱う
-```
-
-> **ポイント**  
-> 日時が重複しないデータなら `ROWS` と `RANGE` の結果は同じです。重複がある場合は `ROWS` の方が挙動が予測しやすいです。通常は `ROWS` を使いましょう。
-
----
-
-## 13. よくあるミス
-
-### ミス1: WHERE句でウィンドウ関数の結果を直接フィルタしようとする
-
-```sql
--- 悪い例: WHERE句でウィンドウ関数を使うとエラー
--- SELECT staff_name, ROW_NUMBER() OVER (ORDER BY sale_amount DESC) AS rn
--- FROM sales_data
--- WHERE rn <= 3;  -- エラー! WHEREの時点ではウィンドウ関数未計算
-
--- 正しい例: CTEかサブクエリを使う
-WITH ranked AS (
+    amount
+FROM (
     SELECT
         staff_name,
-        sale_amount,
-        ROW_NUMBER() OVER (ORDER BY sale_amount DESC) AS rn
-    FROM sales_data
-)
-SELECT staff_name, sale_amount
-FROM ranked
-WHERE rn <= 3;
+        amount,
+        MAX(amount) OVER (PARTITION BY staff_name) AS max_amount
+    FROM sales
+) sub
+WHERE amount = max_amount;
 ```
 
-### ミス2: PARTITION BY なしで全体に適用される
+### EXPLAINでクエリの実行計画を確認する
 
 ```sql
--- 意図: 部署ごとの連番
--- 間違い: PARTITION BY を忘れると全体で1つの連番になる
-SELECT
-    staff_name,
-    department,
-    -- 間違い（全体で連番）
-    ROW_NUMBER() OVER (ORDER BY sale_amount DESC) AS wrong_rn,
-    -- 正しい（部署ごとに連番）
-    ROW_NUMBER() OVER (PARTITION BY department ORDER BY sale_amount DESC) AS correct_rn
-FROM sales_data;
+-- 実行計画を確認（どのように実行されるかを表示）
+EXPLAIN
+SELECT staff_name, amount
+FROM sales
+WHERE amount > (SELECT AVG(amount) FROM sales);
+
+-- より詳細な情報（実際に実行して時間も計測）
+EXPLAIN ANALYZE
+SELECT staff_name, amount
+FROM sales
+WHERE amount > (SELECT AVG(amount) FROM sales);
 ```
 
-### ミス3: ORDER BY の向きを間違える
+> **ポイント**  
+> `EXPLAIN ANALYZE` は実際にクエリを実行して実時間を計測します。本番環境の大テーブルに対してはまず `EXPLAIN`（実行しない）で計画だけ確認しましょう。
+
+> **現場メモ**  
+> サブクエリのパフォーマンス問題で最も典型的なのは「相関サブクエリのN+1」と「IN句に大量の値を渡す」の2パターンです。EXPLAINでは「Subquery Scan」や「Nested Loop」が繰り返し現れたら要注意です。筆者が経験した案件で、顧客一覧を返すAPIが5秒以上かかっていた原因は、SELECT句の中に `(SELECT COUNT(*) FROM orders WHERE customer_id = c.id)` という相関サブクエリが入っており、顧客数分だけSQLが走っていたためでした。LEFT JOIN + GROUP BYに書き換えたところ0.1秒以下になりました。このパターンはORMのlazyloadingでも同じ問題として現れます（N+1問題）。
+
+---
+
+## 9. よくあるミス（列数・行数のミスマッチ）
+
+### ミス1: スカラーサブクエリが複数行を返す
 
 ```sql
--- 累計の計算: ORDER BYの順序によって結果が変わる
-SELECT
-    sale_date,
-    sale_amount,
-    -- 日付昇順の累計（正しい：古い順に積み上げ）
-    SUM(sale_amount) OVER (ORDER BY sale_date ASC) AS asc_cumulative,
-    -- 日付降順の累計（新しい順に積み上げ）
-    SUM(sale_amount) OVER (ORDER BY sale_date DESC) AS desc_cumulative
-FROM sales_data
-ORDER BY sale_date;
+-- 悪い例: サブクエリが複数行を返すとエラー
+-- SELECT staff_name
+-- FROM sales
+-- WHERE amount = (SELECT amount FROM sales WHERE staff_name = '田中');
+-- エラー: subquery returns more than one row
+
+-- 正しい例: INを使う
+SELECT staff_name
+FROM sales
+WHERE amount IN (SELECT amount FROM sales WHERE staff_name = '田中');
+
+-- または集計関数を使う
+SELECT staff_name
+FROM sales
+WHERE amount = (SELECT MAX(amount) FROM sales WHERE staff_name = '田中');
 ```
 
-### ミス4: GROUP BY と ウィンドウ関数を同時に使うときの注意
+### ミス2: 列数のミスマッチ
 
 ```sql
--- GROUP BY で集約した後にウィンドウ関数を使う場合
--- ウィンドウ関数はGROUP BY後の結果に対して動作する
-SELECT
-    department,
-    SUM(sale_amount) AS dept_total,
-    -- 全部署合計に対する割合（GROUP BY後の行に対してウィンドウ関数が動く）
-    ROUND(
-        100.0 * SUM(sale_amount) / SUM(SUM(sale_amount)) OVER (),
-        1
-    ) AS pct_of_all
-FROM sales_data
-GROUP BY department;
+-- 悪い例: IN のサブクエリで複数列を返している
+-- SELECT * FROM products WHERE product_id IN (SELECT product_id, quantity FROM order_items);
+-- エラー: subquery has too many columns
+
+-- 正しい例: 1列だけ返す
+SELECT * FROM products WHERE product_id IN (SELECT product_id FROM order_items);
+```
+
+### ミス3: FROM句サブクエリのエイリアス忘れ
+
+```sql
+-- 悪い例: エイリアスなし
+-- SELECT * FROM (SELECT staff_name, SUM(amount) FROM sales GROUP BY staff_name);
+-- エラー: subquery in FROM must have an alias
+
+-- 正しい例: エイリアスをつける
+SELECT *
+FROM (
+    SELECT staff_name, SUM(amount) AS total FROM sales GROUP BY staff_name
+) AS staff_summary;
+```
+
+### ミス4: NOT INのNULL問題
+
+```sql
+-- これがNULLを含むと全件除外される危険な書き方
+-- SELECT * FROM products WHERE product_id NOT IN (SELECT manager_id FROM staff);
+-- manager_idにNULLが含まれると結果が0件になる!
+
+-- 安全な書き方
+SELECT * FROM products
+WHERE product_id NOT IN (
+    SELECT manager_id FROM staff WHERE manager_id IS NOT NULL
+);
+
+-- またはNOT EXISTSを使う
+SELECT p.* FROM products p
+WHERE NOT EXISTS (
+    SELECT 1 FROM staff s WHERE s.manager_id = p.product_id
+);
 ```
 
 > **注意**  
-> `SUM(SUM(sale_amount)) OVER ()` のように集計関数をネストして書くのは特殊な構文ですが、GROUP BY後の結果に対してウィンドウ関数を適用する有効な書き方です。
+> `NOT IN` のNULL問題は非常に見落としやすいバグの原因です。NULL含む列への `NOT IN` は必ず `NOT EXISTS` または `LEFT JOIN + IS NULL` に置き換える習慣をつけましょう。
 
 ---
 
-## 14. PRレビューのチェックポイント
+## 10. ポイント
 
-- [ ] **ROW_NUMBER / RANK の使い分けが要件と合っているか**
-  - 同率を同じ順位にしたいなら RANK / DENSE_RANK。一意な連番が必要なら ROW_NUMBER
-- [ ] **ウィンドウ関数の結果を WHERE 句で直接フィルタしようとしていないか**
-  - ウィンドウ関数は WHERE で使えない → CTE かサブクエリで囲んでから外側で絞る
-- [ ] **PARTITION BY の有無が要件（グループ内 vs 全体）と一致しているか**
-  - PARTITION BY なしは全行が1つのウィンドウ。意図して使っているかを確認
-- [ ] **LAG / LEAD で前後の行を参照するとき、ORDER BY が正しい列・方向になっているか**
-  - ORDER BY の列や DESC/ASC を間違えると前後関係が逆になる
-- [ ] **累計・移動平均で ROWS フレーム指定が適切か**
-  - `UNBOUNDED PRECEDING` と `CURRENT ROW` の組み合わせが意図通りか確認
+- **相関サブクエリを SELECT 句や WHERE 句に使っている場合、N+1 になっていないか**
+  - 外側の行数分だけ内側が実行される → JOIN + GROUP BY への書き換えを検討
+- **NOT IN のサブクエリに NULL が混入する可能性はないか**
+  - NULL があると結果が 0 件になる → NOT EXISTS か LEFT JOIN + IS NULL を推奨
+- **FROM 句サブクエリ（インラインビュー）が複雑になっていないか**
+  - 3 段以上のネストは CTE に書き換えると可読性が上がる
+- **スカラーサブクエリが「1行のみ返る保証」があるか**
+  - 複数行返る可能性があればエラーになる → LIMIT 1 か集計関数で対応
+- **サブクエリを使っている箇所で EXPLAIN ANALYZE による確認はしたか**
 
 ---
 
-## 15. まとめ
+## 11. まとめ
 
 | テーマ | 要点 |
 | --- | --- |
-| ウィンドウ関数とは | 行数を減らさず、各行に集計結果を付けて返す関数 |
-| GROUP BYとの違い | GROUP BYは行を集約（減る）、ウィンドウ関数は行が残る |
-| OVER句 | ウィンドウ（計算範囲）を指定する。PARTITION BY / ORDER BY / フレームを指定 |
-| PARTITION BY | グループ分け（GROUP BYと似ているが行は減らない）|
-| ROW_NUMBER | 重複なしの連番。同値でも別の番号 |
-| RANK | 同値に同じ順位、飛び番あり（1,1,3）|
-| DENSE_RANK | 同値に同じ順位、飛び番なし（1,1,2）|
-| LAG / LEAD | 前/後の行の値を参照。前月比・翌日比に使う |
-| SUM OVER | 累計・移動合計。ORDER BYとフレームで範囲を制御 |
-| AVG OVER | 移動平均・累計平均。グラフの平滑化に使う |
-| ROWSフレーム | `ROWS BETWEEN N PRECEDING AND M FOLLOWING` で範囲指定 |
-| よくあるミス | WHERE句での直接フィルタ不可・PARTITION BY忘れ |
+| サブクエリとは | SQLの中に書く別のSQL。内側から先に実行される |
+| スカラーサブクエリ | 1行1列を返す。SELECT句やWHERE句の比較演算子と組み合わせる |
+| WHERE + IN | サブクエリが返す複数値との一致確認。NULLに注意 |
+| FROM句サブクエリ | 派生テーブルとして扱う。必ずエイリアスをつける |
+| 相関サブクエリ | 外側の行の値を参照する。行数が多いと遅くなる |
+| EXISTS / NOT EXISTS | 存在チェックに使う。NULLに強く、INより効率的なことが多い |
+| JOIN vs サブクエリ | 列が必要ならJOIN、存在チェックはEXISTS、複雑ならCTE |
+| よくあるミス | 複数行返却・列数不一致・エイリアス忘れ・NOT INのNULL問題 |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS sales (
+  id         INTEGER PRIMARY KEY,
+  staff_name TEXT    NOT NULL,
+  amount     INTEGER NOT NULL,
+  sale_date  DATE    NOT NULL
+);
+DELETE FROM sales;
+INSERT INTO sales (id, staff_name, amount, sale_date) VALUES
+  (1, '田中',  50000, '2024-03-01'),
+  (2, '鈴木',  80000, '2024-03-05'),
+  (3, '田中',  30000, '2024-03-10'),
+  (4, '佐藤', 120000, '2024-03-15'),
+  (5, '鈴木',  40000, '2024-03-20'),
+  (6, '佐藤',  90000, '2024-03-25');
+
+CREATE TABLE IF NOT EXISTS products (
+  product_id   INTEGER PRIMARY KEY,
+  product_name TEXT    NOT NULL,
+  category     TEXT    NOT NULL
+);
+DELETE FROM products;
+INSERT INTO products (product_id, product_name, category) VALUES
+  (1, 'りんご',   '果物'),
+  (2, 'みかん',   '果物'),
+  (3, 'にんじん', '野菜'),
+  (4, 'キャベツ', '野菜'),
+  (5, 'バナナ',   '果物');
+
+CREATE TABLE IF NOT EXISTS order_items (
+  item_id    INTEGER PRIMARY KEY,
+  product_id INTEGER NOT NULL,
+  quantity   INTEGER NOT NULL
+);
+DELETE FROM order_items;
+INSERT INTO order_items (item_id, product_id, quantity) VALUES
+  (1, 1, 3),
+  (2, 3, 5),
+  (3, 5, 2);
+```
+
+### 問題1: スカラーサブクエリで平均以上を絞り込む
+
+> 参照：[2. スカラーサブクエリ（1行1列を返す）](#2-スカラーサブクエリ1行1列を返す)
+
+`sales` テーブルから、全体の平均 `amount` より大きい取引の `staff_name` と `amount` を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT staff_name, amount
+FROM sales
+WHERE amount > (SELECT AVG(amount) FROM sales);
+```
+
+**解説：** `(SELECT AVG(amount) FROM sales)` がスカラーサブクエリです。内側のクエリで全体平均を計算し、その値を外側の WHERE 句の比較に使います。スカラーサブクエリは1行1列を返す必要があり、`AVG` などの集計関数と組み合わせるのが典型パターンです。
+
+</details>
+
+### 問題2: IN と EXISTS で注文済み商品を取得
+
+> 参照：[3. WHERE句のサブクエリ（IN/NOT IN との組み合わせ）](#3-where句のサブクエリinnot-in-との組み合わせ) ・ [6. 相関サブクエリとEXISTS](#6-相関サブクエリとexists)
+
+`products` テーブルから、`order_items` に1件以上登録されている商品の `product_name` を IN を使って取得してください。また、同じ結果を EXISTS でも書いてみてください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+-- IN を使う場合
+SELECT product_name
+FROM products
+WHERE product_id IN (
+    SELECT product_id FROM order_items
+);
+
+-- EXISTS を使う場合
+SELECT p.product_name
+FROM products p
+WHERE EXISTS (
+    SELECT 1
+    FROM order_items oi
+    WHERE oi.product_id = p.product_id
+);
+```
+
+**解説：** `IN` は「サブクエリが返す値リストのいずれかに一致するか」を確認します。`EXISTS` は「サブクエリが1件以上返すか」を確認します。どちらも同じ結果（りんご・にんじん・バナナ）を返しますが、`EXISTS` は最初にマッチした時点で検索を止めるため、大量データでは効率的です。
+
+</details>
+
+### 問題3: FROM句サブクエリでスタッフ別合計を絞り込む
+
+> 参照：[4. FROM句のサブクエリ（インラインビュー・派生テーブル）](#4-from句のサブクエリインラインビュー・派生テーブル)
+
+`sales` テーブルをスタッフ別に合計し、合計 `amount` が 100,000 円以上のスタッフのみを取得してください（FROM句のサブクエリを使って）。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT staff_name, total_amount
+FROM (
+    SELECT staff_name, SUM(amount) AS total_amount
+    FROM sales
+    GROUP BY staff_name
+) AS staff_summary
+WHERE total_amount >= 100000;
+```
+
+**解説：** `WHERE` 句には集計関数を直接書けません（`WHERE SUM(amount) >= ...` はエラー）。FROM句にサブクエリを書いて派生テーブルを作り、外側の `WHERE` で絞り込むのが典型的な解決策です。派生テーブルには必ず `AS staff_summary` のようなエイリアスをつける必要があります。
+
+</details>

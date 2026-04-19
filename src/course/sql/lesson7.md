@@ -1,542 +1,665 @@
-# GROUP BY と HAVING
-GROUP BYでグループ集計し、HAVINGでグループに条件を絞り込みます
+# UPDATE と DELETE
+データを安全に更新・削除するための書き方と事故防止の考え方を学びます
 
 ## 本章の目標
 
 本章では以下を目標にして学習します。
 
-- GROUP BY を使って、特定の列ごとにデータをグループ化できること
-- SELECT に書ける列のルールを理解できること
-- 複数列での GROUP BY ができること
-- HAVING を使ってグループに条件を付けられること
-- WHERE と HAVING の違い・実行順序を説明できること
-- NULL がグループ化でどう扱われるかを理解できること
-- 実務でよく使う月次集計・カテゴリ別集計ができること
+- UPDATE の基本構文で特定の行のデータを更新できること
+- WHERE なし UPDATE の危険性を理解し、事故を防げること
+- DELETE の基本構文で特定の行を削除できること
+- TRUNCATE と DELETE の違いを説明できること
+- トランザクションを使って安全に更新・削除ができること
+- 論理削除パターンを実装できること
 
 ---
 
-## 1. GROUP BY とは
+## 1. UPDATE の基本構文
 
-GROUP BY は、テーブルのデータを「ある列の値が同じもの同士」でひとまとめ（グループ化）する機能です。
-
-### 身近な例で理解する
-
-たとえばスーパーのレシートをイメージしてください。  
-「野菜」「果物」「肉」というカテゴリごとに、それぞれの合計金額を出したい場合が GROUP BY の出番です。
-
-もし GROUP BY がなければ、すべての商品を1つの合計に足すしかありません。  
-GROUP BY を使うことで「カテゴリ別」「都道府県別」「月別」などの内訳を出せます。
-
-以下のサンプルテーブルを本章全体で使います。
+UPDATE 文は既存の行のデータを変更します。
 
 ```sql
--- 商品注文テーブル
-CREATE TABLE orders (
+UPDATE テーブル名
+SET 列1 = 値1, 列2 = 値2
+WHERE 条件;
+```
+
+本章で使うサンプルテーブルを用意します。
+
+```sql
+-- 商品テーブル
+CREATE TABLE products (
     id          SERIAL PRIMARY KEY,
-    customer_id INTEGER,
+    code        TEXT UNIQUE NOT NULL,
+    name        TEXT NOT NULL,
+    price       INTEGER NOT NULL DEFAULT 0,
+    stock       INTEGER NOT NULL DEFAULT 0,
     category    TEXT,
-    prefecture  TEXT,
-    amount      INTEGER,
-    order_date  DATE,
-    status      TEXT
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    deleted_at  TIMESTAMP
 );
 
-INSERT INTO orders (customer_id, category, prefecture, amount, order_date, status) VALUES
-(101, '野菜', '東京',  1200, '2024-01-05', '完了'),
-(102, '果物', '大阪',   800, '2024-01-10', '完了'),
-(101, '肉類', '東京',  3500, '2024-01-15', '完了'),
-(103, '野菜', '東京',   950, '2024-02-03', '完了'),
-(102, '果物', '大阪',  2500, '2024-02-08', '完了'),
-(104, '肉類', NULL,    5000, '2024-02-12', '完了'),
-(101, '野菜', '東京',  1800, '2024-03-01', '完了'),
-(105, '果物', '名古屋', 1100, '2024-03-15', 'キャンセル'),
-(103, '肉類', '東京',  4200, '2024-03-20', '完了');
+INSERT INTO products (code, name, price, stock, category) VALUES
+('APPLE-001', 'りんご',   150, 100, '果物'),
+('BANANA-001', 'バナナ',  120,  80, '果物'),
+('CARROT-001', 'にんじん', 60,  90, '野菜'),
+('SPINACH-001', 'ほうれん草', 80, 60, '野菜'),
+('BEEF-001', '牛肉',     1200,  20, '肉類');
+
+-- 注文テーブル
+CREATE TABLE orders (
+    id          SERIAL PRIMARY KEY,
+    product_id  INTEGER NOT NULL REFERENCES products(id),
+    quantity    INTEGER NOT NULL,
+    order_date  DATE NOT NULL DEFAULT CURRENT_DATE,
+    status      TEXT NOT NULL DEFAULT '受付中'
+);
+
+INSERT INTO orders (product_id, quantity, order_date, status) VALUES
+(1, 5,  '2024-01-05', '完了'),
+(2, 3,  '2024-01-10', '受付中'),
+(3, 10, '2024-02-03', '完了'),
+(1, 2,  '2024-02-08', '受付中'),
+(5, 1,  '2024-03-01', '完了');
 ```
 
----
-
-## 2. GROUP BY の基本構文
+### 例：りんごの価格を 150 → 180 に変更する
 
 ```sql
-SELECT グループ化する列, 集計関数(...)
-FROM テーブル名
-GROUP BY グループ化する列;
+UPDATE products
+SET price = 180
+WHERE code = 'APPLE-001';
 ```
 
-### 例：カテゴリ別の合計金額
+### 例：複数列を同時に更新する（後述のセクション3）
 
 ```sql
-SELECT
-    category,
-    SUM(amount) AS total_amount
-FROM orders
-GROUP BY category;
+UPDATE products
+SET
+    price    = 180,
+    stock    = 90,
+    category = '国産果物'
+WHERE code = 'APPLE-001';
 ```
-
-実行結果のイメージ：
-
-| category | total_amount |
-|----------|-------------|
-| 果物     | 4400        |
-| 肉類     | 12700       |
-| 野菜     | 3950        |
 
 > **ポイント**  
-> GROUP BY を使うと、テーブル全体が「category ごとのグループ」に分割され、  
-> 各グループに対して集計関数（SUM, COUNT, AVG など）が適用されます。
+> UPDATE を実行する前に、必ず WHERE 条件を確認しましょう。  
+> WHERE を書き忘れると、テーブルの **全行** が更新されてしまいます。
 
 ---
 
-## 3. GROUP BY と SELECT の関係
+## 2. WHERE なし UPDATE の危険性
 
-GROUP BY を使う場合、SELECT に書ける列には制限があります。
-
-### ルール：SELECT に書ける列
-
-1. GROUP BY に指定した列
-2. 集計関数（SUM, COUNT, AVG, MAX, MIN など）を使った式
-
-### NG 例：GROUP BY に指定していない列を SELECT に書く
+WHERE を指定しないと、テーブルの全行が更新されます。
 
 ```sql
--- これはエラーになる
-SELECT
-    category,
-    customer_id,   -- ← GROUP BY に含まれていないためエラー
-    SUM(amount)
-FROM orders
-GROUP BY category;
+-- NG：これはすべての商品価格が 0 になる（全行更新）
+UPDATE products
+SET price = 0;
+-- 5行すべて更新される！
 ```
-
-エラーメッセージ例：
-```
-ERROR: column "orders.customer_id" must appear in the GROUP BY clause
-or be used in an aggregate function
-```
-
-### なぜエラーになるのか？
-
-「野菜カテゴリ」には customer_id が 101, 103, 101 と複数あります。  
-グループ化すると1行に圧縮されますが、どの customer_id を返せばよいか DB は判断できません。  
-そのため、GROUP BY 対象外の列を SELECT に書くとエラーになります。
-
-> **注意**  
-> PostgreSQL は他の DB（MySQL など）より厳密です。  
-> MySQL では GROUP BY 非対象列でもエラーにならないケースがありますが、  
-> 意図しない値が返ってくる危険があるため、必ず GROUP BY に含めるか集計関数を使いましょう。
-
-> **現場メモ**  
-> MySQLからPostgreSQLに移行したプロジェクトで、MySQLでは動いていたSQLが大量にエラーになりました。原因のほとんどが「GROUP BY非対象列をSELECTしていた」問題でした。MySQLのデフォルト設定では曖昧なGROUP BYを許容していたため、移行して初めて問題が発覚した形です。実はMySQLでも `ONLY_FULL_GROUP_BY` モードを有効にすると同様にエラーになります。「MySQLで動いていたから正しい」は間違いで、意図しない代表値が返っていた可能性があります。PostgreSQLの厳しさはバグを防いでくれるので、エラーが出たときは修正の機会と捉えましょう。
-
----
-
-## 4. 複数列の GROUP BY
-
-複数の列を組み合わせてグループ化できます。
-
-### 例：都道府県 × カテゴリ別の集計
 
 ```sql
-SELECT
-    prefecture,
-    category,
-    COUNT(*)        AS order_count,
-    SUM(amount)     AS total_amount,
-    AVG(amount)     AS avg_amount
-FROM orders
-GROUP BY prefecture, category
-ORDER BY prefecture, category;
-```
-
-実行結果のイメージ：
-
-| prefecture | category | order_count | total_amount | avg_amount |
-|------------|----------|-------------|-------------|------------|
-| NULL       | 肉類     | 1           | 5000        | 5000.00    |
-| 大阪       | 果物     | 2           | 3300        | 1650.00    |
-| 名古屋     | 果物     | 1           | 1100        | 1100.00    |
-| 東京       | 肉類     | 2           | 7700        | 3850.00    |
-| 東京       | 野菜     | 3           | 3950        | 1316.67    |
-
-> **ポイント**  
-> GROUP BY に複数列を指定すると、「列1の値 + 列2の値」の組み合わせが同じ行が  
-> ひとまとめになります。組み合わせの数だけ結果行が返ります。
-
----
-
-## 5. HAVING でグループに条件をつける
-
-WHERE は個々の行に条件をつけますが、**HAVING はグループ化した後の結果に条件をつけます**。
-
-### 構文
-
-```sql
-SELECT グループ化する列, 集計関数(...)
-FROM テーブル名
-GROUP BY グループ化する列
-HAVING 集計関数に対する条件;
-```
-
-### 例：合計金額が 3000 円以上のカテゴリのみ表示
-
-```sql
-SELECT
-    category,
-    SUM(amount) AS total_amount
-FROM orders
-GROUP BY category
-HAVING SUM(amount) >= 3000;
-```
-
-実行結果：
-
-| category | total_amount |
-|----------|-------------|
-| 肉類     | 12700       |
-| 果物     | 4400        |
-
-> **ポイント**  
-> HAVING には集計関数を使った条件を書きます。  
-> 「グループの合計が〇〇以上」「グループの件数が〇件以上」という絞り込みに使います。
-
----
-
-## 6. WHERE vs HAVING の違い（実行順序）
-
-WHERE と HAVING は似ていますが、適用されるタイミングが異なります。
-
-### SQL の実行順序
-
-```
-FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY
-```
-
-図で整理すると：
-
-```
-1. FROM orders          -- テーブル全体を読み込む
-2. WHERE status = '完了' -- 個々の行を絞り込む（集計前）
-3. GROUP BY category    -- グループ化する
-4. HAVING SUM(...) >= X -- グループを絞り込む（集計後）
-5. SELECT ...           -- 結果列を選ぶ
-6. ORDER BY ...         -- 並び替える
-```
-
-### 実例：WHERE と HAVING を組み合わせる
-
-```sql
--- キャンセルを除いた上で、合計が 3000 円以上のカテゴリを取得
-SELECT
-    category,
-    COUNT(*)        AS order_count,
-    SUM(amount)     AS total_amount
-FROM orders
-WHERE status = '完了'         -- まず行を絞り込む（集計前）
-GROUP BY category
-HAVING SUM(amount) >= 3000    -- グループを絞り込む（集計後）
-ORDER BY total_amount DESC;
+-- このように実行するつもりだったとしても...
+UPDATE products
+SET price = 0
+-- WHERE を書き忘れた！
+;
 ```
 
 > **注意**  
-> HAVING に集計関数以外の条件（例：`HAVING category = '野菜'`）を書くことは可能ですが、  
-> そのような条件は WHERE に書く方が効率的です。  
-> DB は WHERE を先に処理してから GROUP BY するため、不要な行を早めに除外できます。
+> WHERE を書き忘れた UPDATE は、取り消しできません（トランザクション外の場合）。  
+> 本番データで誤って全行更新してしまった事故は実際に起きています。  
+> 後述する「事故防止パターン」を必ず実践しましょう。
 
 > **現場メモ**  
-> `HAVING category = '野菜'` のように、集計関数を使わない条件をHAVINGに書いているコードをレビューで時々見かけます。動きはしますが、パフォーマンス上は損です。WHEREで先に絞り込めば、GROUP BYが処理する行数が減ります。特に数百万行のテーブルではその差が顕著に出ます。HAVING は「集計関数に対する条件」だけに使う、という使い分けを意識してください。また、HAVING内で同じ集計式を何度も書く場合、CTEやサブクエリでまとめると可読性とパフォーマンスが改善することもあります。
+> `UPDATE products SET price = 0` をWHERE句なしで実行して全商品の価格が0円になった、という事故は現場では本当に起きます。「たった1行のミスが数万件のデータを吹き飛ばす」のがUPDATE/DELETEの怖さです。筆者も新人のころ、本番でWHERE句を書き忘れて全行更新してしまい、バックアップから復元するという経験をしました。それ以来、本番DBで手動SQLを実行するときは必ず「① SELECTで対象行を確認 → ② BEGINでトランザクション開始 → ③ UPDATE/DELETE実行 → ④ 件数とデータを目視確認 → ⑤ COMMIT」という手順を必ず踏むようにしています。ツールによっては「safe-update mode」（WHERE句のないUPDATE/DELETEを拒否する設定）も活用できます。
 
-### WHERE と HAVING を間違える例
+### 安全のための確認手順
 
 ```sql
--- NG：集計関数は WHERE に書けない
-SELECT category, SUM(amount)
-FROM orders
-WHERE SUM(amount) >= 3000   -- エラー！集計関数は WHERE に使えない
-GROUP BY category;
+-- 手順1：まず SELECT で対象行を確認する
+SELECT id, code, name, price
+FROM products
+WHERE code = 'APPLE-001';   -- これで1行だけ返ってくるか確認
 
--- OK：HAVING を使う
-SELECT category, SUM(amount)
-FROM orders
-GROUP BY category
-HAVING SUM(amount) >= 3000;
+-- 手順2：確認できたら UPDATE を実行する
+UPDATE products
+SET price = 180
+WHERE code = 'APPLE-001';
 ```
 
 ---
 
-## 7. NULL のグループ化
+## 3. 複数列の同時更新
 
-GROUP BY を使うとき、NULL 値はどう扱われるでしょうか？
-
-### NULL は1つのグループになる
+SET 句にカンマ区切りで複数列を並べることで、1つの UPDATE で複数列を更新できます。
 
 ```sql
-SELECT
-    prefecture,
-    COUNT(*)    AS order_count,
-    SUM(amount) AS total_amount
-FROM orders
-GROUP BY prefecture;
-```
-
-実行結果：
-
-| prefecture | order_count | total_amount |
-|------------|-------------|-------------|
-| NULL       | 1           | 5000        |
-| 大阪       | 2           | 3300        |
-| 名古屋     | 1           | 1100        |
-| 東京       | 5           | 16650       |
-
-NULL を持つ行はすべて「NULL グループ」として1つにまとめられます。
-
-> **ポイント**  
-> NULL は「値が不明」という意味ですが、GROUP BY では「NULL = NULL」として同じグループに  
-> まとめます。これは通常の比較（NULL = NULL は FALSE）と異なる動作です。
-
-### NULL グループを除外したい場合
-
-```sql
-SELECT
-    prefecture,
-    SUM(amount) AS total_amount
-FROM orders
-WHERE prefecture IS NOT NULL    -- WHERE で NULL を除外
-GROUP BY prefecture;
-```
-
----
-
-## 8. GROUP BY + ORDER BY の組み合わせ
-
-GROUP BY の結果は、デフォルトでは順序が保証されません。  
-ORDER BY を使って明示的に並び替えましょう。
-
-```sql
--- 合計金額の降順で並べる
-SELECT
-    category,
-    SUM(amount)  AS total_amount,
-    COUNT(*)     AS order_count
-FROM orders
-GROUP BY category
-ORDER BY total_amount DESC;   -- 集計結果の列名（エイリアス）で並び替えも可
+-- 複数列を一度に更新
+UPDATE products
+SET
+    price    = 200,
+    stock    = 150,
+    category = '特選果物'
+WHERE id = 1;
 ```
 
 ```sql
--- 列番号で ORDER BY する書き方（短く書けるが可読性が下がる）
-SELECT
-    category,
-    SUM(amount) AS total_amount
-FROM orders
-GROUP BY category
-ORDER BY 2 DESC;   -- SELECT の2番目の列で並び替え
+-- 現在の値に基づいた計算で更新
+UPDATE products
+SET
+    price = price * 1.1,           -- 現在の価格の 1.1 倍（値上げ10%）
+    stock = stock - 5              -- 在庫を5減らす
+WHERE category = '果物'
+  AND stock > 5;                   -- 在庫が5以上の商品のみ
 ```
 
 > **ポイント**  
-> ORDER BY には SELECT で定義したエイリアス（`total_amount` など）が使えます。  
-> これは ORDER BY の評価が SELECT より後だからです。  
-> 一方、WHERE と HAVING では SELECT エイリアスは使えません（評価順が先のため）。
+> `SET 列名 = 列名 + 値` のように現在の値を参照した計算もできます。  
+> これは在庫の加減算や、カウンタの増減によく使われます。
 
 ---
 
-## 9. 実務でよく使う集計パターン
+## 4. UPDATE ... FROM（別テーブルを参照した更新）
 
-### 月次集計
+別テーブルのデータを参照して UPDATE できます。  
+PostgreSQL 特有の `UPDATE ... FROM` 構文を使います。
+
+### 例：注文テーブルから数量を取得して在庫を減らす
 
 ```sql
--- 月別の注文件数と合計金額
-SELECT
-    DATE_TRUNC('month', order_date) AS month,
-    COUNT(*)                        AS order_count,
-    SUM(amount)                     AS total_amount
-FROM orders
-WHERE status = '完了'
-GROUP BY DATE_TRUNC('month', order_date)
-ORDER BY month;
+-- 完了した注文の数量だけ在庫を減らす
+UPDATE products AS p
+SET stock = p.stock - o.quantity
+FROM orders AS o
+WHERE p.id = o.product_id
+  AND o.status = '完了'
+  AND o.order_date = CURRENT_DATE;
 ```
 
-実行結果のイメージ：
-
-| month      | order_count | total_amount |
-|------------|-------------|-------------|
-| 2024-01-01 | 3           | 5450        |
-| 2024-02-01 | 3           | 8450        |
-| 2024-03-01 | 2           | 6000        |
+### 例：別テーブルのマスタ価格を反映する
 
 ```sql
--- 年月を "2024-01" 形式の文字列で表示したい場合
-SELECT
-    TO_CHAR(order_date, 'YYYY-MM') AS year_month,
-    COUNT(*)                       AS order_count,
-    SUM(amount)                    AS total_amount
-FROM orders
-WHERE status = '完了'
-GROUP BY TO_CHAR(order_date, 'YYYY-MM')
-ORDER BY year_month;
-```
+-- 価格マスタテーブルの価格を商品テーブルに反映する
+CREATE TABLE price_master (
+    product_code TEXT PRIMARY KEY,
+    new_price    INTEGER NOT NULL
+);
 
-### カテゴリ別集計（構成比も出す）
+INSERT INTO price_master VALUES
+('APPLE-001',  200),
+('BANANA-001', 130);
 
-```sql
--- カテゴリ別の売上と全体に占める割合
-SELECT
-    category,
-    SUM(amount)                                     AS total_amount,
-    ROUND(
-        SUM(amount) * 100.0 / SUM(SUM(amount)) OVER (),
-        1
-    )                                               AS ratio_pct
-FROM orders
-WHERE status = '完了'
-GROUP BY category
-ORDER BY total_amount DESC;
+-- price_master の価格で products を更新
+UPDATE products AS p
+SET price = pm.new_price
+FROM price_master AS pm
+WHERE p.code = pm.product_code;
 ```
 
 > **ポイント**  
-> `SUM(SUM(amount)) OVER ()` はウィンドウ関数を組み合わせた書き方です。  
-> 全カテゴリの合計金額をウィンドウ関数で求めることで、1つの SELECT で構成比まで計算できます。  
-> ウィンドウ関数の詳細は別章で扱います。
+> `UPDATE ... FROM` は PostgreSQL の拡張です。  
+> 標準 SQL のサブクエリ方式（`UPDATE ... SET 列 = (SELECT ...)  WHERE ...`）でも同じことができます。  
+> PostgreSQL では FROM を使った方が可読性が高くなることが多いです。
 
-### 上位 N グループを取得する
+---
+
+## 5. RETURNING 句（更新後の値を確認）
+
+INSERT と同様に、UPDATE でも RETURNING 句で更新後の値を取得できます。
 
 ```sql
--- 売上上位3カテゴリを取得
+-- 更新後の値を返す
+UPDATE products
+SET price = price * 1.1
+WHERE category = '果物'
+RETURNING id, code, name, price AS new_price;
+```
+
+実行結果イメージ：
+
+| id | code        | name   | new_price |
+|----|-------------|--------|-----------|
+| 1  | APPLE-001   | りんご | 198       |
+| 2  | BANANA-001  | バナナ | 132       |
+
+```sql
+-- 更新前の値と更新後の値を比較する（サブクエリを使う）
+WITH updated AS (
+    UPDATE products
+    SET price = price * 1.1
+    WHERE category = '果物'
+    RETURNING id, code, name, price AS new_price
+)
 SELECT
-    category,
-    SUM(amount) AS total_amount
-FROM orders
-GROUP BY category
-ORDER BY total_amount DESC
-LIMIT 3;
+    u.code,
+    u.name,
+    p.price                    AS old_price,
+    u.new_price
+FROM updated AS u
+JOIN products AS p ON u.id = p.id;
 ```
 
-### 件数が X 以上のグループのみ取得（HAVING の実務活用）
+> **ポイント**  
+> RETURNING を使うと UPDATE 後の値を確認できます。  
+> アプリケーション側で「更新後の値をすぐ使いたい」場合に、追加の SELECT が不要です。
+
+---
+
+## 6. DELETE の基本構文
+
+DELETE 文は行を削除します。
 
 ```sql
--- 注文件数が2件以上の顧客を取得
-SELECT
-    customer_id,
-    COUNT(*)    AS order_count,
-    SUM(amount) AS total_amount
-FROM orders
-GROUP BY customer_id
-HAVING COUNT(*) >= 2
-ORDER BY order_count DESC;
+DELETE FROM テーブル名
+WHERE 条件;
+```
+
+### 例：特定の商品を削除する
+
+```sql
+-- id = 5 の商品を削除する
+DELETE FROM products
+WHERE id = 5;
+```
+
+```sql
+-- 在庫ゼロの商品をすべて削除する
+DELETE FROM products
+WHERE stock = 0;
+```
+
+> **ポイント**  
+> 外部キー参照がある場合（orders が products を参照している等）、  
+> 参照されている行を DELETE しようとすると外部キー制約エラーになります。  
+> 先に子テーブルの行を削除してから親テーブルを削除するか、  
+> `ON DELETE CASCADE` を設定する必要があります。
+
+---
+
+## 7. WHERE なし DELETE の危険性
+
+WHERE を指定しないと、テーブルの **全行** が削除されます。
+
+```sql
+-- NG：これはテーブルの全行が削除される！
+DELETE FROM products;
+-- 5行すべて削除される！
+```
+
+> **注意**  
+> WHERE なし DELETE は本番環境で絶対に避けなければならない操作です。  
+> 削除したデータはトランザクション外では復元できません。  
+> 必ず WHERE 条件を付け、事前に SELECT で対象行を確認してから実行しましょう。
+
+---
+
+## 8. DELETE ... USING（別テーブルを参照した削除）
+
+別テーブルの条件を参照して削除できます。
+
+```sql
+-- キャンセルされた注文の商品を削除する例
+-- （実務ではこういうケースは論理削除で対応するのが一般的）
+DELETE FROM orders AS o
+USING products AS p
+WHERE o.product_id = p.id
+  AND p.is_active = FALSE
+  AND o.status = '受付中';
+```
+
+```sql
+-- 30日以上前に完了した注文を削除する
+DELETE FROM orders
+WHERE status = '完了'
+  AND order_date < CURRENT_DATE - INTERVAL '30 days';
+```
+
+> **ポイント**  
+> DELETE ... USING は PostgreSQL の拡張構文です。  
+> 標準 SQL では `DELETE FROM テーブル WHERE 列 IN (SELECT ...)` のように書きます。
+
+---
+
+## 9. TRUNCATE vs DELETE
+
+テーブルの全データを消去したい場合、DELETE と TRUNCATE の2つの方法があります。
+
+| 比較項目 | DELETE（WHERE なし） | TRUNCATE |
+|---------|---------------------|---------|
+| 速度 | 遅い（行を1行ずつ処理） | 速い（ページ単位で削除） |
+| ロールバック | 可能 | 可能（PostgreSQL ではトランザクション内なら） |
+| RETURNING 句 | 使える | 使えない |
+| トリガー | 発火する | TRUNCATE トリガーのみ発火（ROW レベルトリガーは非発火） |
+| 自動採番リセット | されない | RESTART IDENTITY でリセット可能 |
+| 外部キー参照 | エラーになる | CASCADE を指定しないとエラー |
+
+```sql
+-- TRUNCATE の基本（全行削除）
+TRUNCATE TABLE products;
+
+-- TRUNCATE + シーケンスリセット
+TRUNCATE TABLE products RESTART IDENTITY;
+
+-- 外部キー参照のある関連テーブルも含めて削除
+TRUNCATE TABLE products CASCADE;
+```
+
+> **注意**  
+> PostgreSQL では TRUNCATE もトランザクション内であればロールバックできます。  
+> しかし MySQL では TRUNCATE は暗黙の COMMIT を発行するため、ロールバックできません。  
+> DB の種類によって挙動が異なる点に注意しましょう。
+
+---
+
+## 10. 事故防止パターン
+
+実務での更新・削除は「一発でやらない」ことが大原則です。  
+以下のパターンを必ず守りましょう。
+
+### 黄金パターン：SELECT → BEGIN → DML → 確認 → COMMIT
+
+```sql
+-- ステップ1：まず SELECT で対象行を確認する
+SELECT id, code, name, price
+FROM products
+WHERE category = '果物';
+-- → 期待通りの行が返ってきているか確認
+
+-- ステップ2：トランザクションを開始する
+BEGIN;
+
+-- ステップ3：UPDATE または DELETE を実行する
+UPDATE products
+SET price = price * 1.2
+WHERE category = '果物';
+-- UPDATE 2 のように影響行数が表示される
+
+-- ステップ4：結果を SELECT で確認する
+SELECT id, code, name, price FROM products WHERE category = '果物';
+-- → 値が正しく変わっているか確認
+
+-- ステップ5：問題なければ COMMIT、おかしければ ROLLBACK
+COMMIT;    -- 確定
+-- または
+ROLLBACK;  -- 取り消し
+```
+
+> **注意**  
+> `BEGIN` なしで DML を実行すると、即座にコミットされます（オートコミット）。  
+> 取り消しができないため、特に本番環境では必ず BEGIN から始めましょう。
+
+### WHERE 条件の件数確認パターン
+
+```sql
+-- WHERE 条件に一致する件数を先に確認する
+SELECT COUNT(*) FROM products WHERE category = '果物';
+-- → 2件
+
+-- 件数が想定通りなら UPDATE を実行
+UPDATE products SET price = price * 1.2 WHERE category = '果物';
+-- UPDATE 2 ← 件数が一致しているか確認
 ```
 
 ---
 
-## 10. よくあるミスと対処法
+## 11. 論理削除の実装パターン
 
-### ミス1：SELECT に GROUP BY 対象外の列を入れる
+「削除」といっても、実際には行を消さずに「削除フラグ」を立てるだけの設計があります。  
+これを **論理削除** といいます。
 
-```sql
--- NG：customer_id は GROUP BY に含まれていない
-SELECT category, customer_id, SUM(amount)
-FROM orders
-GROUP BY category;
--- ERROR: column "orders.customer_id" must appear in the GROUP BY clause...
-```
+### 論理削除とは
 
-**対処法：** customer_id を GROUP BY に追加するか、集計関数（MAX, MIN など）で包む。
+| 物理削除 | 論理削除 |
+|---------|---------|
+| DELETE で行を消す | is_deleted = TRUE や deleted_at = NOW() を設定 |
+| データは復元不可（バックアップから戻すしかない） | フラグを戻せばデータが復元できる |
+| ストレージを節約できる | 削除済みデータが残るためストレージを消費 |
+| 参照整合性を保ちやすい | 常に WHERE deleted_at IS NULL を付けなければならない |
 
-```sql
--- OK：GROUP BY に追加
-SELECT category, customer_id, SUM(amount)
-FROM orders
-GROUP BY category, customer_id;
-
--- OK：集計関数で包む（例：最初の customer_id を代表値として取得）
-SELECT category, MIN(customer_id) AS sample_customer_id, SUM(amount)
-FROM orders
-GROUP BY category;
-```
-
-### ミス2：HAVING に書くべき条件を WHERE に書く
+### 実装例：deleted_at 列による論理削除
 
 ```sql
--- NG：集計関数は WHERE に書けない
-SELECT category, SUM(amount)
-FROM orders
-WHERE SUM(amount) > 1000
-GROUP BY category;
--- ERROR: aggregate functions are not allowed in WHERE
+-- 削除する（deleted_at に現在時刻を入れる）
+UPDATE products
+SET deleted_at = NOW()
+WHERE id = 3;
+
+-- 有効なレコードのみ取得（常に WHERE deleted_at IS NULL が必要）
+SELECT id, code, name, price
+FROM products
+WHERE deleted_at IS NULL;
+
+-- 削除済みのレコードを復元する
+UPDATE products
+SET deleted_at = NULL
+WHERE id = 3;
 ```
 
-**対処法：** HAVING に移す。
+### ビューで隠ぺいする
+
+毎回 `WHERE deleted_at IS NULL` を書くのを忘れると、削除済みデータが混入します。  
+ビューを使ってデフォルトで除外する設計が有効です。
 
 ```sql
--- OK
-SELECT category, SUM(amount)
-FROM orders
-GROUP BY category
-HAVING SUM(amount) > 1000;
+-- 有効な商品のみを返すビュー
+CREATE VIEW active_products AS
+SELECT *
+FROM products
+WHERE deleted_at IS NULL;
+
+-- ビューから SELECT すれば条件不要
+SELECT id, code, name, price
+FROM active_products;
 ```
 
-### ミス3：ORDER BY を GROUP BY より先に書く
-
-```sql
--- NG：構文エラー
-SELECT category, SUM(amount)
-FROM orders
-ORDER BY SUM(amount) DESC
-GROUP BY category;
--- ERROR: syntax error at or near "GROUP"
-```
-
-**対処法：** GROUP BY → ORDER BY の順番を守る。
-
-```sql
--- OK
-SELECT category, SUM(amount) AS total_amount
-FROM orders
-GROUP BY category
-ORDER BY total_amount DESC;
-```
-
-### ミス4：WHERE でエイリアスを使う
-
-```sql
--- NG：WHERE は SELECT より先に評価されるため、エイリアスは使えない
-SELECT category, SUM(amount) AS total_amount
-FROM orders
-WHERE total_amount > 1000   -- エラー！
-GROUP BY category;
-```
-
-**対処法：** WHERE には元の列名や式を書く。集計後の絞り込みは HAVING を使う。
-
-```sql
--- OK
-SELECT category, SUM(amount) AS total_amount
-FROM orders
-GROUP BY category
-HAVING SUM(amount) > 1000;
-```
+> **ポイント**  
+> 論理削除を採用する場合のデメリット：  
+> - クエリに常に `WHERE deleted_at IS NULL` が必要（忘れるとバグの原因）  
+> - テーブルが肥大化する（定期的なアーカイブが必要）  
+> - 外部キー制約が「論理削除済みのレコードを参照しているか」を検知しない  
+> 
+> 論理削除が適しているのは「削除履歴を残したい」「誤削除を復元したい」場合です。  
+> 要件に応じて物理削除と使い分けましょう。
 
 ---
 
-## 11. PRレビューのチェックポイント
+## 12. よくあるミス
 
-- [ ] `SELECT` に `GROUP BY` 非対象の列を含めていないか
-- [ ] `WHERE` に集計関数を使っていないか（`HAVING` に移す）
-- [ ] `HAVING` に集計関数以外の条件を書いていないか（`WHERE` に移した方が効率的）
-- [ ] `GROUP BY` の順序が `SELECT` → `FROM` → `WHERE` → `GROUP BY` → `HAVING` → `ORDER BY` になっているか
-- [ ] 月次集計などで `DATE_TRUNC` か `TO_CHAR` の選択が要件と合っているか（前者はTIMESTAMP型、後者はTEXT型を返す）
-- [ ] NULL グループが結果に含まれることを考慮しているか（意図的に除外するなら `WHERE IS NOT NULL` を追加する）
+### ミス1：WHERE を付けずに全行更新・削除
+
+```sql
+-- NG（全行更新）
+UPDATE products SET price = 0;
+
+-- NG（全行削除）
+DELETE FROM products;
+```
+
+**対処法：** 必ず BEGIN してから実行し、ROLLBACK できる状態にしておく。  
+WHERE 条件を先に SELECT で確認する。
+
+### ミス2：外部キー制約エラー
+
+```sql
+-- NG：orders が product_id=1 を参照しているため削除できない
+DELETE FROM products WHERE id = 1;
+-- ERROR: update or delete on table "products" violates foreign key constraint...
+```
+
+**対処法：** 先に子テーブルの参照行を削除するか、論理削除を使う。
+
+```sql
+-- OK：先に子テーブルの行を削除
+DELETE FROM orders WHERE product_id = 1;
+DELETE FROM products WHERE id = 1;
+```
+
+### ミス3：UPDATE で SET を忘れる
+
+```sql
+-- NG：文法エラー
+UPDATE products
+price = 180       -- SET が抜けている
+WHERE id = 1;
+```
+
+**対処法：** `UPDATE テーブル SET 列=値 WHERE 条件` の順番を覚える。
+
+### ミス4：RETURNING を付けたまま本番実行して結果を確認し忘れる
+
+RETURNING を付けて実行すると、更新結果が返ってきます。  
+「結果を見て問題があった」と気づいてもすでに COMMIT 済みのことがあります。  
+必ず BEGIN → 実行 → RETURNING で確認 → COMMIT の順番を守りましょう。
+
+### ミス5：論理削除のフィルタを忘れる
+
+```sql
+-- NG：deleted_at IS NULL がないため削除済みも含む
+SELECT * FROM products WHERE category = '果物';
+```
+
+**対処法：** ビューを作成して論理削除フィルタを一元化する。
 
 ---
 
-## 12. まとめ
+## 13. ポイント
+
+### UPDATE / DELETE の安全確認
+
+- **WHERE 句がない UPDATE / DELETE になっていないか**
+  - WHERE 句なしは全行対象になる。意図的な全件操作でもコメントで明示する
+- **UPDATE / DELETE の前に SELECT で対象行数を確認する手順があるか**
+  - 本番手動実行時は「SELECT → BEGIN → DML → 確認 → COMMIT」の手順を必ず踏む
+- **大量行の UPDATE / DELETE をトランザクション1つで実行しようとしていないか**
+  - ロック時間とロールバック時間を考慮してバッチ処理に分割する
+
+### 論理削除・物理削除
+
+- **DELETE を使っている箇所が本当に物理削除すべきデータか確認したか**
+  - 監査・トレーサビリティが必要なテーブルには論理削除を使う
+- **論理削除テーブルへの SELECT に `deleted_at IS NULL` フィルタが入っているか**
+
+### UPSERT / RETURNING
+
+- **DO NOTHING と DO UPDATE の選択が要件と一致しているか**
+  - 競合時に既存データを保持したいのか上書きしたいのかを明確にする
+- **RETURNING 句を使う場合、アプリ側で結果を受け取る処理があるか**
+
+---
+
+## 14. まとめ
 
 | テーマ | 要点 |
 | --- | --- |
-| GROUP BY の役割 | 指定列の値が同じ行をグループ化し、集計関数を適用する |
-| SELECT できる列 | GROUP BY に指定した列、または集計関数を使った式のみ |
-| 複数列の GROUP BY | カンマ区切りで複数列を指定。組み合わせが同じ行がまとまる |
-| HAVING | グループ化・集計後に条件を絞り込む。集計関数が使える |
-| 実行順序 | FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY |
-| NULL のグループ化 | NULL は1つのグループとしてまとめられる |
-| ORDER BY との組み合わせ | GROUP BY の後に ORDER BY を書く。エイリアスも使える |
-| 月次集計 | DATE_TRUNC や TO_CHAR で日付をグループ化キーにする |
-| よくあるミス | SELECT に非集計列を書く / HAVING に書くべき条件を WHERE に書く |
+| UPDATE 基本 | `UPDATE テーブル SET 列=値 WHERE 条件` WHERE 必須 |
+| WHERE なし UPDATE | 全行が更新される。本番で絶対に避ける |
+| 複数列更新 | SET 句にカンマ区切りで複数列を指定 |
+| UPDATE ... FROM | 別テーブルを参照した更新。PostgreSQL 拡張 |
+| RETURNING 句 | 更新後の値を取得できる。追加 SELECT が不要 |
+| DELETE 基本 | `DELETE FROM テーブル WHERE 条件` WHERE 必須 |
+| WHERE なし DELETE | 全行が削除される。本番で絶対に避ける |
+| DELETE ... USING | 別テーブルを参照した削除 |
+| TRUNCATE vs DELETE | TRUNCATE は高速。ロールバック可否はDBに依存 |
+| 事故防止パターン | SELECT で確認 → BEGIN → DML → SELECT で確認 → COMMIT |
+| 論理削除 | deleted_at = NOW() でフラグ管理。ビューで透過的にフィルタ |
+| よくあるミス | WHERE 忘れ / 外部キー制約 / 論理削除フィルタ忘れ |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS accounts (
+  id      INTEGER PRIMARY KEY,
+  name    TEXT    NOT NULL,
+  balance INTEGER NOT NULL
+);
+DELETE FROM accounts;
+INSERT INTO accounts (id, name, balance) VALUES
+  (1, '田中', 50000),
+  (2, '鈴木', 120000),
+  (3, '佐藤', 30000);
+
+CREATE TABLE IF NOT EXISTS articles (
+  id           INTEGER PRIMARY KEY,
+  title        TEXT      NOT NULL,
+  published_at TIMESTAMP,
+  author_id    INTEGER
+);
+DELETE FROM articles;
+INSERT INTO articles (id, title, published_at, author_id)
+SELECT
+  gs,
+  '記事' || gs,
+  TIMESTAMP '2024-01-01 00:00:00' + (gs - 1) * INTERVAL '8 hours',
+  (gs % 3) + 1
+FROM generate_series(1, 100) AS gs;
+```
+
+### 問題1: 送金トランザクション
+
+> 参照：[1. UPDATE の基本構文](#1-update-の基本構文) ・ [6. DELETE の基本構文](#6-delete-の基本構文)
+
+`鈴木`（id=2）から `田中`（id=1）へ 20000 円を送金するトランザクションを書いてください。どちらかの UPDATE が失敗したら全体を取り消してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+BEGIN;
+
+UPDATE accounts SET balance = balance - 20000 WHERE id = 2;
+UPDATE accounts SET balance = balance + 20000 WHERE id = 1;
+
+COMMIT;
+```
+
+**解説：** `BEGIN` でトランザクションを開始し、2つの UPDATE を実行します。両方成功したら `COMMIT` で確定します。途中でエラーが発生した場合は `ROLLBACK` を実行すれば全変更が取り消されます。2つの UPDATE を別々のトランザクションで実行すると、片方だけ成功する「部分更新」が起きる可能性があります。
+
+</details>
+
+### 問題2: OFFSET ページング
+
+> 参照：[9. TRUNCATE vs DELETE](#9-truncate-vs-delete)
+
+`articles` テーブルから `published_at` の降順で2ページ目（1ページ10件）を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT id, title, published_at
+FROM articles
+ORDER BY published_at DESC
+LIMIT 10 OFFSET 10;
+```
+
+**解説：** `OFFSET 10` で最初の10件をスキップし、`LIMIT 10` で次の10件を返します。シンプルですが、OFFSET が大きくなるほど先頭からスキャンが必要なため件数が多いテーブルでは遅くなります。
+
+</details>
+
+### 問題3: カーソルベースのページング
+
+> 参照：[11. 論理削除の実装パターン](#11-論理削除の実装パターン)
+
+前のページ最後の記事が `id=50`, `published_at='2024-01-15 12:00:00'` だったとき、次の10件をカーソルベースで取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT id, title, published_at
+FROM articles
+WHERE published_at < '2024-01-15 12:00:00'
+   OR (published_at = '2024-01-15 12:00:00' AND id < 50)
+ORDER BY published_at DESC, id DESC
+LIMIT 10;
+```
+
+**解説：** OFFSET の代わりに「前ページ最後の値より小さい行」を WHERE で指定します。インデックスを使って直接該当位置から読み始めるため、ページが深くなっても一定の速度を保てます。`published_at` が同じ行が存在する場合の重複を `id` で区別するのがポイントです。
+
+</details>

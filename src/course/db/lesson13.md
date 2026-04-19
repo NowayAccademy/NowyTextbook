@@ -544,6 +544,8 @@ WHERE u.user_id = 42;
 
 ### 問題1: 統計情報が古くて実行計画が外れている
 
+> 参照：[2. EXPLAINの基本構文と出力の読み方](#2-explainの基本構文と出力の読み方) ・ [5. Seq Scan vs Index Scanの判断](#5-seq-scan-vs-index-scanの判断)
+
 ```sql
 -- 症状：EXPLAINのrows推定が実際の行数と大きく乖離
 
@@ -555,6 +557,8 @@ VACUUM ANALYZE;
 ```
 
 ### 問題2: テーブルの肥大化（Seq Scanが特に遅くなる）
+
+> 参照：[7. N+1問題とは](#7-n1問題とは)
 
 大量のDELETE/UPDATEをした後、テーブルサイズが縮まらない場合があります。
 
@@ -574,6 +578,8 @@ VACUUM ANALYZE orders;
 ```
 
 ### 問題3: ORDER BY + LIMIT が遅い
+
+> 参照：[8. クエリチューニングの基本パターン](#8-クエリチューニングの基本パターン) ・ [3. EXPLAIN ANALYZEの違い](#3-explain-analyzeの違い)
 
 ```sql
 -- インデックスがない列でのORDER BYはSortノードが発生する
@@ -613,28 +619,142 @@ SELECT * FROM users WHERE deleted_at IS NULL;
 | N+1問題 | ループ内で1クエリずつ発行するアンチパターン。JOINで解決 |
 | チューニングの基本 | インデックス追加・相関サブクエリ→JOIN・SELECT *排除 |
 
-## PRレビューのチェックポイント
+## ポイント
 
 クエリのパフォーマンスに関するコードをレビューするとき、筆者が必ず確認するポイントをまとめます。「EXPLAINをかけたことがない」クエリが本番に出ていくことを防ぐための観点です。
 
 **クエリの設計**
-- [ ] ループ内でDBクエリを発行していないか（N+1問題）
-- [ ] `SELECT *` を使っていないか（必要な列だけ取得しているか）
-- [ ] `WHERE` 句の条件列にインデックスが効いているか（EXPLAIN で確認済みか）
-- [ ] `WHERE` 句の列に関数をかけていないか（インデックスが効かなくなる）
-- [ ] 大量データを対象とするクエリに `LIMIT` がついているか
+- ループ内でDBクエリを発行していないか（N+1問題）
+- `SELECT *` を使っていないか（必要な列だけ取得しているか）
+- `WHERE` 句の条件列にインデックスが効いているか（EXPLAIN で確認済みか）
+- `WHERE` 句の列に関数をかけていないか（インデックスが効かなくなる）
+- 大量データを対象とするクエリに `LIMIT` がついているか
 
 **実行計画の確認**
-- [ ] 新規クエリや変更したクエリに `EXPLAIN ANALYZE` をかけて確認しているか
-- [ ] `Seq Scan` が大テーブルで出ていないか
-- [ ] `rows` 推定と実際の行数に大きな乖離がないか（ある場合は `ANALYZE` 済みか）
-- [ ] JOINの `loops` 値が過大になっていないか
+- 新規クエリや変更したクエリに `EXPLAIN ANALYZE` をかけて確認しているか
+- `Seq Scan` が大テーブルで出ていないか
+- `rows` 推定と実際の行数に大きな乖離がないか（ある場合は `ANALYZE` 済みか）
+- JOINの `loops` 値が過大になっていないか
 
 **インデックスの管理**
-- [ ] 追加するインデックスは本当に使われるか（EXPLAIN で確認済みか）
-- [ ] インデックスの追加は `CREATE INDEX CONCURRENTLY` を使っているか（本番テーブルのロックを避けるため）
-- [ ] 不要なインデックスを増やしていないか（インデックスはINSERT/UPDATEを遅くする）
+- 追加するインデックスは本当に使われるか（EXPLAIN で確認済みか）
+- インデックスの追加は `CREATE INDEX CONCURRENTLY` を使っているか（本番テーブルのロックを避けるため）
+- 不要なインデックスを増やしていないか（インデックスはINSERT/UPDATEを遅くする）
 
 **N+1問題**
-- [ ] ORMを使っている場合、関連エンティティのイーガーロードを設定しているか
-- [ ] 修正後に実際のクエリ発行回数が減ったことを確認しているか（pg_stat_statements または開発ツール）
+- ORMを使っている場合、関連エンティティのイーガーロードを設定しているか
+- 修正後に実際のクエリ発行回数が減ったことを確認しているか（pg_stat_statements または開発ツール）
+
+---
+
+## 練習問題
+
+### 問題1: EXPLAIN の読み方
+
+以下の EXPLAIN 出力を読んで、問題点と改善方法を答えてください。
+
+```
+EXPLAIN SELECT * FROM orders WHERE user_id = 42;
+
+                          QUERY PLAN
+---------------------------------------------------------------
+ Seq Scan on orders  (cost=0.00..25000.00 rows=10 width=64)
+   Filter: (user_id = 42)
+```
+
+<details>
+<summary>回答を見る</summary>
+
+**問題点：**
+- `Seq Scan`（シーケンシャルスキャン）が発生している = テーブル全件を読んでいる
+- `cost` の上限値 25000.00 は大きく、全件スキャンのコスト
+
+**改善方法：`user_id` にインデックスを追加**
+
+```sql
+CREATE INDEX idx_orders_user_id ON orders (user_id);
+```
+
+**改善後の EXPLAIN（期待値）：**
+```
+Index Scan using idx_orders_user_id on orders  (cost=0.43..8.46 rows=10 width=64)
+  Index Cond: (user_id = 42)
+```
+
+**解説：** `Seq Scan` は全件スキャンを意味し、件数が多いテーブルでは遅くなります。`Index Scan` や `Index Only Scan` が表示されればインデックスが使われています。`EXPLAIN ANALYZE` を使うと実際の実行時間も確認できます。
+
+</details>
+
+### 問題2: N+1 問題の解決
+
+以下のような処理（疑似コード）がN+1問題を起こしています。SQLで1クエリに改善してください。
+
+```python
+# N+1問題のコード
+articles = db.query("SELECT id, title FROM articles LIMIT 10")
+for article in articles:
+    author = db.query(f"SELECT name FROM users WHERE id = {article.user_id}")
+    print(article.title, author.name)
+```
+
+<details>
+<summary>回答を見る</summary>
+
+**改善後：JOIN で1クエリに統合**
+
+```sql
+SELECT a.id, a.title, u.name AS author_name
+FROM articles AS a
+JOIN users AS u ON a.user_id = u.id
+LIMIT 10;
+```
+
+**解説：** N+1問題は「1回のクエリでN件取得 → N件それぞれに追加クエリ = N+1回のクエリ」という非効率なパターンです。JOIN でまとめると1回のクエリで全データを取得できます。ORM（ActiveRecord, Sequelize等）を使っている場合は「Eager Loading」（includes, preload等）で解決します。N=10の場合は11クエリ→1クエリになります。
+
+</details>
+
+### 問題3: EXPLAIN ANALYZE の活用
+
+以下の遅いクエリを最適化してください。EXPLAIN ANALYZE でどの部分に問題があるかを特定する手順も示してください。
+
+```sql
+SELECT u.name, COUNT(o.id) AS order_count
+FROM users AS u
+LEFT JOIN orders AS o ON u.id = o.user_id
+WHERE EXTRACT(YEAR FROM o.created_at) = 2024
+GROUP BY u.id, u.name;
+```
+
+<details>
+<summary>回答を見る</summary>
+
+**問題の特定手順：**
+
+```sql
+EXPLAIN ANALYZE
+SELECT u.name, COUNT(o.id) AS order_count
+FROM users AS u
+LEFT JOIN orders AS o ON u.id = o.user_id
+WHERE EXTRACT(YEAR FROM o.created_at) = 2024
+GROUP BY u.id, u.name;
+```
+
+**問題点：**
+1. `EXTRACT(YEAR FROM o.created_at) = 2024` は関数でカラムを加工しているためインデックスが使えない
+2. LEFT JOIN なのに WHERE で `o.created_at` を条件にすると、NULL行（注文なしユーザー）が除外される（実質 INNER JOIN になる）
+
+**改善版：**
+
+```sql
+SELECT u.name, COUNT(o.id) AS order_count
+FROM users AS u
+LEFT JOIN orders AS o
+  ON u.id = o.user_id
+  AND o.created_at >= '2024-01-01'
+  AND o.created_at < '2025-01-01'   -- 範囲比較でインデックスを使用
+GROUP BY u.id, u.name;
+```
+
+**解説：** ① 関数変換をやめて範囲比較に変更（インデックスが使える）、② 日付条件を JOIN の ON 句に移動（LEFT JOIN の NULL を保持するため）。`EXPLAIN ANALYZE` の出力で `Seq Scan` の行と実際の実行時間（`actual time`）を確認して改善効果を測定します。
+
+</details>

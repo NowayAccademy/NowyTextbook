@@ -381,17 +381,17 @@ CREATE TABLE order_items (
 
 「今は1つしか選ばないから…」と1対多で設計すると、後で要件が変わったときの改修コストが大きくなります。将来的に多対多になりそうな関係は最初から中間テーブルで設計しましょう。
 
-## 8. PRレビューのチェックポイント
+## 8. ポイント
 
-- [ ] **多対多の関係に中間テーブルが用意されているか**
+- **多対多の関係に中間テーブルが用意されているか**
   - 外部キーだけで多対多を表現しようとしていないか確認
-- [ ] **中間テーブルに複合 PRIMARY KEY が設定されているか**
+- **中間テーブルに複合 PRIMARY KEY が設定されているか**
   - 不必要なサロゲートキーを追加する前に複合 PK を検討する
-- [ ] **中間テーブルに ON DELETE CASCADE の設定が要件と合っているか**
+- **中間テーブルに ON DELETE CASCADE の設定が要件と合っているか**
   - 親が消えたとき中間テーブルのレコードも消えるべきか確認
-- [ ] **購入・注文など「その時点の状態を保持すべき」データが中間テーブルにスナップショットされているか**
+- **購入・注文など「その時点の状態を保持すべき」データが中間テーブルにスナップショットされているか**
   - 単価・名前など変わりうる値は中間テーブルにコピーして保持する
-- [ ] **「今は1対多で十分」な関係が将来的に多対多になりうるか議論したか**
+- **「今は1対多で十分」な関係が将来的に多対多になりうるか議論したか**
 
 ---
 
@@ -406,3 +406,104 @@ CREATE TABLE order_items (
 | 追加属性 | 中間テーブルに数量・単価・日付など「関係の属性」を持たせられる |
 | JOIN2回 | 中間テーブルを経由して2回JOINすることで両テーブルを結合できる |
 | 現場パターン | タグ機能、権限管理（RBAC）などで頻繁に登場する |
+
+---
+
+## 練習問題
+
+### 問題1: 中間テーブルの設計
+
+> 参照：[3. 中間テーブルの設計](#3-中間テーブルの設計)
+
+タグ機能を実装します。`articles`（記事）と `tags`（タグ）の多対多関係を中間テーブルで設計してください。同じ記事に同じタグが重複して付かないようにしてください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+CREATE TABLE articles (
+  id         BIGSERIAL PRIMARY KEY,
+  title      TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE tags (
+  id   BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE article_tags (
+  article_id BIGINT NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+  tag_id     BIGINT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (article_id, tag_id)
+);
+```
+
+**解説：** 複合主キー `PRIMARY KEY (article_id, tag_id)` が重複防止の役割を果たします。`ON DELETE CASCADE` を付けることで、記事やタグを削除したとき中間テーブルのレコードも自動的に削除されます。
+
+</details>
+
+### 問題2: 中間テーブルを経由した JOIN
+
+> 参照：[5. 多対多の検索パターン](#5-多対多の検索パターンjoinを2回使う)
+
+`articles` と `tags` を `article_tags` 経由でJOINし、各記事のタイトルとそれに付いたタグ名一覧を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT a.title, t.name AS tag_name
+FROM articles AS a
+JOIN article_tags AS at ON a.id = at.article_id
+JOIN tags AS t ON at.tag_id = t.id
+ORDER BY a.id, t.name;
+```
+
+**解説：** 多対多の取得は「articles → article_tags → tags」と2回 JOIN します。1つの記事に複数タグがあれば、記事のタイトルが複数行に繰り返されます（タグの数だけ行が出る）。アプリ側でグループ化するか、`STRING_AGG(t.name, ', ')` でタグを1列にまとめることもできます。
+
+</details>
+
+### 問題3: 中間テーブルへの属性追加
+
+> 参照：[4. 中間テーブルに追加属性を持たせる](#4-中間テーブルに追加属性を持たせる) ・ [6. 多対多の現場パターン](#6-多対多の現場パターン)
+
+権限管理システム（RBAC）を設計します。`users`・`roles`・`permissions` の3テーブルで以下を実現してください。
+
+- ユーザーは複数のロールを持てる
+- ロールは複数の権限を持てる
+- ユーザーへのロール付与日時を記録したい
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+CREATE TABLE roles (
+  id   BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE  -- 'admin', 'editor', 'viewer' など
+);
+
+CREATE TABLE permissions (
+  id   BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE  -- 'articles:read', 'articles:write' など
+);
+
+-- ユーザー ↔ ロール（付与日時を属性として持つ）
+CREATE TABLE user_roles (
+  user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role_id    BIGINT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+  granted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, role_id)
+);
+
+-- ロール ↔ 権限
+CREATE TABLE role_permissions (
+  role_id       BIGINT NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+  permission_id BIGINT NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
+  PRIMARY KEY (role_id, permission_id)
+);
+```
+
+**解説：** 中間テーブルに `granted_at` のような「関係の属性」を追加できるのが中間テーブルの強みです。ロール付与の取り消しは `user_roles` から DELETE、付与は INSERT するだけで済みます。RBACはWebアプリの権限管理の定番パターンです。
+
+</details>

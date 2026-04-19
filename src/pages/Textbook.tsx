@@ -10,6 +10,32 @@ const courseImageModules = import.meta.glob("../course/**/images/*", {
   import: "default",
 }) as Record<string, string>;
 
+const slugify = (text: string): string => {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\u3040-\u309f\u30a0-\u30ff\u3400-\u9fff\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+};
+
+const headingWithId =
+  (Tag: "h2" | "h3") =>
+  ({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement>) => {
+    const text =
+      typeof children === "string"
+        ? children
+        : Array.isArray(children)
+          ? children.map((c) => (typeof c === "string" ? c : "")).join("")
+          : "";
+    const id = slugify(text);
+    return (
+      <Tag id={id} {...props}>
+        {children}
+      </Tag>
+    );
+  };
+
 const splitMarkdownByH2 = (markdown: string) => {
   const lines = markdown.split("\n");
   const introLines: string[] = [];
@@ -118,8 +144,8 @@ const courseLessons: Record<string, { title: string; url: string }[]> = {
   ],
   db: [
     { title: "1. データベースとRDBMSの仕組み", url: "/course/db/lesson1" },
-    { title: "2. 主キーと外部キー", url: "/course/db/lesson2" },
-    { title: "3. 環境構築", url: "/course/db/lesson3" },
+    { title: "2. 環境構築", url: "/course/db/lesson2" },
+    { title: "3. 主キーと外部キー", url: "/course/db/lesson3" },
     { title: "4. データ型の選び方とPK設計", url: "/course/db/lesson4" },
     { title: "5. 制約", url: "/course/db/lesson5" },
     { title: "6. テーブル定義", url: "/course/db/lesson6" },
@@ -139,17 +165,17 @@ const courseLessons: Record<string, { title: string; url: string }[]> = {
     { title: "3. NULL と CASE式", url: "/course/sql/lesson3" },
     { title: "4. 文字列検索パターン", url: "/course/sql/lesson4" },
     { title: "5. 関数と型変換", url: "/course/sql/lesson5" },
-    { title: "6. 集計関数", url: "/course/sql/lesson6" },
-    { title: "7. GROUP BY と HAVING", url: "/course/sql/lesson7" },
-    { title: "8. JOINの基本", url: "/course/sql/lesson8" },
-    { title: "9. JOIN応用", url: "/course/sql/lesson9" },
-    { title: "10. サブクエリ", url: "/course/sql/lesson10" },
-    { title: "11. CTE（WITH句）", url: "/course/sql/lesson11" },
-    { title: "12. VIEW", url: "/course/sql/lesson12" },
-    { title: "13. ウィンドウ関数", url: "/course/sql/lesson13" },
-    { title: "14. INSERT と UPSERT", url: "/course/sql/lesson14" },
-    { title: "15. UPDATE と DELETE", url: "/course/sql/lesson15" },
-    { title: "16. トランザクションとページング", url: "/course/sql/lesson16" },
+    { title: "6. INSERT と UPSERT", url: "/course/sql/lesson6" },
+    { title: "7. UPDATE と DELETE", url: "/course/sql/lesson7" },
+    { title: "8. トランザクションとページング", url: "/course/sql/lesson8" },
+    { title: "9. 集計関数", url: "/course/sql/lesson9" },
+    { title: "10. GROUP BY と HAVING", url: "/course/sql/lesson10" },
+    { title: "11. JOINの基本", url: "/course/sql/lesson11" },
+    { title: "12. JOIN応用", url: "/course/sql/lesson12" },
+    { title: "13. サブクエリ", url: "/course/sql/lesson13" },
+    { title: "14. CTE（WITH句）", url: "/course/sql/lesson14" },
+    { title: "15. VIEW", url: "/course/sql/lesson15" },
+    { title: "16. ウィンドウ関数", url: "/course/sql/lesson16" },
   ],
   java: [
     { title: "1. Java言語とは", url: "/course/java/lesson1" },
@@ -221,6 +247,8 @@ const Textbook = () => {
                     remarkPlugins={[remarkGfm]}
                     rehypePlugins={[rehypeRaw]}
                     components={{
+                      h2: headingWithId("h2"),
+                      h3: headingWithId("h3"),
                       table: ({ children }) => (
                         <div className="my-5 overflow-x-auto rounded-lg border border-slate-200 bg-white">
                           <table className="min-w-[720px]">{children}</table>
@@ -245,6 +273,8 @@ const Textbook = () => {
               remarkPlugins={[remarkGfm]}
               rehypePlugins={[rehypeRaw]}
               components={{
+                h2: headingWithId("h2"),
+                h3: headingWithId("h3"),
                 table: ({ children }) => (
                   <div className="my-6 overflow-x-auto rounded-lg border border-slate-200 bg-white">
                     <table className="min-w-[720px]">{children}</table>

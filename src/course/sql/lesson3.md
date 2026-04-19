@@ -412,14 +412,14 @@ SELECT COUNT(email) FROM employees;   -- 3（emailがNULLの行を除く）
 
 ---
 
-## 11. PRレビューのチェックポイント
+## 11. ポイント
 
-- [ ] `= NULL` や `!= NULL` で NULL 比較をしていないか（`IS NULL` / `IS NOT NULL` を使う）
-- [ ] `NOT IN (SELECT ...)` パターンを使っていないか（サブクエリにNULLが混入すると全件除外になる）
-- [ ] `CASE WHEN column = NULL THEN ...` と書いていないか（`IS NULL` が正しい）
-- [ ] NULL を含む列での計算（+, -, ||など）に `COALESCE` が適用されているか
-- [ ] `COALESCE` で NULL を変換するタイミング（集計前か集計後か）が要件と合っているか
-- [ ] `COUNT(*)` と `COUNT(列名)` の使い分けが意図に合っているか
+- `= NULL` や `!= NULL` で NULL 比較をしていないか（`IS NULL` / `IS NOT NULL` を使う）
+- `NOT IN (SELECT ...)` パターンを使っていないか（サブクエリにNULLが混入すると全件除外になる）
+- `CASE WHEN column = NULL THEN ...` と書いていないか（`IS NULL` が正しい）
+- NULL を含む列での計算（+, -, ||など）に `COALESCE` が適用されているか
+- `COALESCE` で NULL を変換するタイミング（集計前か集計後か）が要件と合っているか
+- `COUNT(*)` と `COUNT(列名)` の使い分けが意図に合っているか
 
 ---
 
@@ -437,3 +437,90 @@ SELECT COUNT(email) FROM employees;   -- 3（emailがNULLの行を除く）
 | 検索 CASE | `CASE WHEN 条件 THEN 結果` で任意の条件を評価する |
 | CASE + 集計 | `SUM(CASE...)` や `COUNT(CASE...)` で条件付き集計ができる |
 | NOT IN と NULL | サブクエリに NULL が含まれると NOT IN は全行を除外する |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS employees (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT    NOT NULL,
+  age        INTEGER,
+  manager_id INTEGER,
+  bonus      INTEGER
+);
+DELETE FROM employees;
+INSERT INTO employees (id, name, age, manager_id, bonus) VALUES
+  (1, '田中', 40, NULL, 50000),
+  (2, '鈴木', 32,    1,  NULL),
+  (3, '佐藤', 28,    1, 30000),
+  (4, '山田', 45, NULL,     0),
+  (5, '中村', 35,    1,  NULL);
+```
+
+### 問題1: NULL を 0 に置換
+
+> 参照：[5. COALESCE](#5-coalesce最初の-null-でない値を返す) ・ [3. IS NULL / IS NOT NULL](#3-is-null-is-not-null)
+
+`name` と `bonus` を取得してください。`bonus` が NULL の場合は `0` として表示してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT name, COALESCE(bonus, 0) AS bonus
+FROM employees;
+```
+
+**解説：** `COALESCE(値, デフォルト)` は最初の非 NULL 値を返します。bonus が NULL の鈴木・中村は 0 に置き換えられます。
+
+</details>
+
+### 問題2: CASE 式でボーナスをランク分け
+
+> 参照：[7. CASE 式の2種類](#7-case-式の2種類) ・ [8. CASE で NULL を扱う](#8-case-で-null-を扱う)
+
+`name` と、bonus の金額に応じたランクを取得してください。
+- 30000 以上 → `'高い'`
+- 1 以上 → `'普通'`
+- 0 → `'ゼロ'`
+- NULL → `'未設定'`
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT name,
+  CASE
+    WHEN bonus >= 30000 THEN '高い'
+    WHEN bonus >= 1     THEN '普通'
+    WHEN bonus = 0      THEN 'ゼロ'
+    ELSE '未設定'
+  END AS bonus_rank
+FROM employees;
+```
+
+**解説：** `CASE WHEN ... THEN ... END` は上から順に評価し、最初に真になった条件の値を返します。NULL は `>=` などの比較演算子では真にならないため `ELSE` に落ちます。
+
+</details>
+
+### 問題3: NULLIF の活用
+
+> 参照：[6. NULLIF](#6-nullif2つの値が等しければ-null-を返す)
+
+`bonus` が `0` の場合を NULL として扱い、`name` と `bonus` を取得してください（0 と「未入力」を区別するケースの逆変換）。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT name, NULLIF(bonus, 0) AS bonus
+FROM employees;
+```
+
+**解説：** `NULLIF(a, b)` は a と b が等しいとき NULL を返します。山田の bonus 0 が NULL に変換されます。`COALESCE` と逆の使い方で、「0 を特別扱いしたくない」集計前処理などに役立ちます。
+
+</details>

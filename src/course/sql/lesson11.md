@@ -1,533 +1,664 @@
-# CTE（WITH句）
-WITH句で複雑なクエリを分解して読みやすくし、再帰CTEでツリー構造を扱います
+# JOINの基本
+テーブルを結合する概念を理解し、INNER JOIN・LEFT JOINを使いこなします
 
 ## 本章の目標
 
 本章では以下を目標にして学習します。
 
-- WITH句を使ってクエリを読みやすく分解できること
-- 複数のCTEを連鎖させて複雑な処理を段階的に書けること
-- CTEとサブクエリ・VIEWの違いを理解して使い分けられること
-- 再帰CTEを使って組織ツリーやカテゴリ階層を扱えること
-- 無限再帰を防ぐための制限を書けること
+- なぜ JOIN が必要かを説明できること
+- INNER JOIN と LEFT JOIN の違いを理解し、使い分けられること
+- テーブルエイリアス（AS）を使ってクエリを簡潔に書けること
+- ON 句と WHERE 句の違いを説明できること
+- 1対多の JOIN で行が増える現象を理解できること
+- USING 句を使って同名列で結合できること
 
 ---
 
-## 1. CTEとは（Common Table Expression）
+## 1. なぜ JOIN が必要か
 
-### CTEの概念
+データベースでは、データを「テーブルに分けて保存する（正規化）」のが基本です。  
+たとえば EC サイトのデータを考えてみましょう。
 
-**CTE（Common Table Expression：共通テーブル式）**は、クエリの中で一時的に名前付きの結果セットを定義する仕組みです。`WITH` キーワードを使って書くため「WITH句」とも呼ばれます。
+### 正規化されていない場合（NG）
 
-イメージとしては「作業用の一時テーブルに名前をつけて、その後のSELECTで使い回す」感じです。料理で例えると、「下ごしらえした食材に名前をつけて保管しておき、後で使う」ようなものです。
+| order_id | customer_name | customer_email        | product | amount |
+|----------|--------------|-----------------------|---------|--------|
+| 1        | 田中 太郎    | tanaka@example.com    | りんご  | 1500   |
+| 2        | 田中 太郎    | tanaka@example.com    | バナナ  | 800    |
+| 3        | 鈴木 花子    | suzuki@example.com    | みかん  | 1200   |
+
+「田中 太郎」さんのメールアドレスが変わったとき、2行すべてを更新しなければなりません。  
+更新漏れがあると「同じ顧客なのにデータが矛盾する」という問題が起きます。
+
+### 正規化されている場合（OK）
+
+**customers テーブル**
+
+| id  | name      | email               |
+|-----|-----------|---------------------|
+| 101 | 田中 太郎 | tanaka@example.com  |
+| 102 | 鈴木 花子 | suzuki@example.com  |
+
+**orders テーブル**
+
+| id | customer_id | product | amount |
+|----|-------------|---------|--------|
+| 1  | 101         | りんご  | 1500   |
+| 2  | 101         | バナナ  | 800    |
+| 3  | 102         | みかん  | 1200   |
+
+メールアドレスは customers テーブルの1か所だけに保存されています。  
+変更があっても1行だけ更新すれば OK です。
+
+**このように分割されたテーブルを組み合わせて使うのが JOIN の役割です。**
+
+> **ポイント**  
+> JOIN は「複数のテーブルを外部キーで結びつけて、1つの結果として取り出す」機能です。  
+> SQL のなかで最も重要な機能の1つであり、実務でほぼ必ず使います。
+
+---
+
+## 2. JOIN の概念（ベン図で説明）
+
+JOIN の種類をベン図で整理すると理解しやすいです。
+
+```
+テーブル A                テーブル B
+┌─────────────┐         ┌─────────────┐
+│  A にしか   │  共通   │  B にしか   │
+│  ない行     │  部分   │  ない行     │
+└─────────────┘         └─────────────┘
+
+INNER JOIN : 共通部分のみ（両方に一致する行）
+LEFT JOIN  : A の全行 + 共通部分（B に一致しない A の行も含む）
+RIGHT JOIN : B の全行 + 共通部分（A に一致しない B の行も含む）
+FULL OUTER JOIN : A と B の全行
+```
+
+本章ではよく使う **INNER JOIN** と **LEFT JOIN** を中心に学びます。
+
+以下のサンプルテーブルを使います。
 
 ```sql
--- テーブル準備
-CREATE TABLE employees (
-    emp_id      INT PRIMARY KEY,
-    emp_name    TEXT,
-    department  TEXT,
-    salary      INT,
-    manager_id  INT
+-- 顧客テーブル
+CREATE TABLE customers (
+    id    SERIAL PRIMARY KEY,
+    name  TEXT NOT NULL,
+    email TEXT NOT NULL
 );
 
-INSERT INTO employees VALUES
-    (1, '社長 山田',   '経営', 1000000, NULL),
-    (2, '部長 鈴木',   '開発', 700000,  1),
-    (3, '部長 田中',   '営業', 680000,  1),
-    (4, '課長 佐藤',   '開発', 550000,  2),
-    (5, '課長 伊藤',   '開発', 530000,  2),
-    (6, '一般 渡辺',   '開発', 400000,  4),
-    (7, '一般 中村',   '営業', 380000,  3),
-    (8, '一般 小林',   '営業', 360000,  3);
+INSERT INTO customers (id, name, email) VALUES
+(101, '田中 太郎', 'tanaka@example.com'),
+(102, '鈴木 花子', 'suzuki@example.com'),
+(103, '山田 次郎', 'yamada@example.com'),
+(104, '佐藤 三郎', 'sato@example.com');   -- 注文なし
+
+-- 注文テーブル
+CREATE TABLE orders (
+    id          SERIAL PRIMARY KEY,
+    customer_id INTEGER REFERENCES customers(id),
+    product     TEXT,
+    amount      INTEGER,
+    order_date  DATE
+);
+
+INSERT INTO orders (id, customer_id, product, amount, order_date) VALUES
+(1, 101, 'りんご',  1500, '2024-01-05'),
+(2, 101, 'バナナ',   800, '2024-01-10'),
+(3, 102, 'みかん',  1200, '2024-02-03'),
+(4, 103, 'ぶどう',  3000, '2024-02-08'),
+(5, 999, 'いちご',  2500, '2024-03-01');  -- customer_id=999 は customers に存在しない
 ```
 
 ---
 
-## 2. 基本的なCTE構文（WITH name AS (...)）
+## 3. INNER JOIN の構文と動作
 
-### CTEの書き方
-
-```sql
--- 基本構文
-WITH cte名 AS (
-    -- ここにSQLを書く
-    SELECT ...
-)
-SELECT *
-FROM cte名;
-```
-
-```sql
--- 実例: 高給与社員のみを抽出するCTE
-WITH high_salary_employees AS (
-    SELECT emp_id, emp_name, department, salary
-    FROM employees
-    WHERE salary >= 500000
-)
-SELECT *
-FROM high_salary_employees
-ORDER BY salary DESC;
-```
-
-```sql
--- CTEを複数回参照する例
-WITH dept_stats AS (
-    SELECT
-        department,
-        AVG(salary) AS avg_salary,
-        MAX(salary) AS max_salary,
-        COUNT(*)    AS emp_count
-    FROM employees
-    GROUP BY department
-)
-SELECT
-    department,
-    avg_salary,
-    max_salary,
-    emp_count
-FROM dept_stats
-WHERE avg_salary > 500000;
-```
-
-> **ポイント**  
-> CTEは `WITH` から始まり、最後に必ず `SELECT`（または `INSERT`/`UPDATE`/`DELETE`）が続きます。CTEの定義だけでは何も実行されません。
-
----
-
-## 3. CTEを使うメリット（可読性・再利用性）
-
-### サブクエリと比べての違い
-
-```sql
--- サブクエリで書いた場合（ネストが深くて読みにくい）
-SELECT
-    d.department,
-    d.avg_salary,
-    e.emp_name
-FROM (
-    SELECT department, AVG(salary) AS avg_salary
-    FROM employees
-    GROUP BY department
-) d
-INNER JOIN employees e ON e.department = d.department
-WHERE e.salary > d.avg_salary
-ORDER BY d.department, e.salary DESC;
-
--- CTEで書いた場合（段階的で読みやすい）
-WITH dept_avg AS (
-    SELECT department, AVG(salary) AS avg_salary
-    FROM employees
-    GROUP BY department
-)
-SELECT
-    da.department,
-    da.avg_salary,
-    e.emp_name,
-    e.salary
-FROM dept_avg da
-INNER JOIN employees e ON e.department = da.department
-WHERE e.salary > da.avg_salary
-ORDER BY da.department, e.salary DESC;
-```
-
-> **ポイント**  
-> CTEを使うと「まず部門別平均を計算し、次にその平均より高い社員を探す」という処理の意図が段階的に読み取れます。コードレビューや後の保守がしやすくなります。
-
----
-
-## 4. 複数CTEの連鎖
-
-### 複数のCTEを定義して組み合わせる
-
-複数のCTEをカンマで区切って定義でき、後のCTEで前のCTEを参照できます。
-
-```sql
-WITH
--- ステップ1: 部門別の統計を計算
-dept_stats AS (
-    SELECT
-        department,
-        AVG(salary) AS avg_salary,
-        COUNT(*)    AS emp_count
-    FROM employees
-    GROUP BY department
-),
--- ステップ2: 平均給与でランキング
-dept_ranked AS (
-    SELECT
-        department,
-        avg_salary,
-        emp_count,
-        RANK() OVER (ORDER BY avg_salary DESC) AS salary_rank
-    FROM dept_stats
-),
--- ステップ3: 上位2部門のみ取得
-top_departments AS (
-    SELECT *
-    FROM dept_ranked
-    WHERE salary_rank <= 2
-)
--- 最終結果を取得
-SELECT
-    td.department,
-    td.avg_salary,
-    td.emp_count,
-    e.emp_name,
-    e.salary
-FROM top_departments td
-INNER JOIN employees e ON e.department = td.department
-ORDER BY td.salary_rank, e.salary DESC;
-```
-
-> **ポイント**  
-> 複数CTEは `WITH` の中でカンマ区切りで書きます。後から定義したCTEは前のCTEを参照できますが、前のCTEが後のCTEを参照することはできません（順方向のみ）。
-
----
-
-## 5. CTE vs サブクエリ（どちらを使うべきか）
-
-### 使い分けの基準
-
-```sql
--- 【サブクエリが適している場面】
--- シンプルな1回だけの条件フィルタ
-SELECT emp_name
-FROM employees
-WHERE salary > (SELECT AVG(salary) FROM employees);
-
--- 【CTEが適している場面】
--- 同じ集計結果を複数回参照する場合
-WITH avg_salary AS (
-    SELECT AVG(salary) AS avg FROM employees
-)
-SELECT
-    emp_name,
-    salary,
-    salary - (SELECT avg FROM avg_salary) AS diff  -- CTEを参照
-FROM employees
-WHERE salary > (SELECT avg FROM avg_salary);       -- 同じCTEを再利用
-```
-
-| 比較項目 | サブクエリ | CTE |
-|----------|------------|-----|
-| 書き方 | クエリ内にネスト | WITH句で先に定義 |
-| 可読性 | ネストが深いと読みにくい | 段階的で読みやすい |
-| 再利用 | 同じ内容を何度も書く必要がある | 同一CTEを複数箇所で参照できる |
-| デバッグ | 部分的な確認が難しい | CTEを個別に実行して確認できる |
-| パフォーマンス | DBによって最適化される | DBによって最適化される |
-
-> **ポイント**  
-> 複雑なクエリ、複数回参照する集計、段階的な処理にはCTEが向いています。シンプルな1回限りの条件にはサブクエリで十分です。迷ったらCTEを使う方が後の保守が楽になることが多いです。
-
-> **現場メモ**  
-> CTEを学ぶと「今まで苦労して書いていたクエリがこんなにシンプルになるのか」と感動するエンジニアが多いです。筆者が研修で一番「わかりやすかった」と言われたのもCTEの「段階的に処理を書いていける」という特性です。実務では特に「集計クエリのデバッグ」にCTEが役立ちます。WITH句の各ブロックを個別に SELECT して中間結果を確認できるため、「どのステップで行数がおかしくなっているか」を素早く特定できます。レポートやバッチ処理のような複雑なSQLを書く際は、最初からCTEで各処理を分けて書くことをお勧めします。
-
----
-
-## 6. CTE vs VIEW（一時的か永続的か）
-
-### VIEWとの違い
-
-```sql
--- VIEW: データベースに保存される永続的な仮想テーブル
-CREATE VIEW high_salary_view AS
-SELECT emp_id, emp_name, salary
-FROM employees
-WHERE salary >= 500000;
-
--- 作成後は何度でも参照できる
-SELECT * FROM high_salary_view;
-
--- CTE: クエリの実行中のみ存在する一時的なもの
-WITH high_salary_cte AS (
-    SELECT emp_id, emp_name, salary
-    FROM employees
-    WHERE salary >= 500000
-)
-SELECT * FROM high_salary_cte;  -- このクエリが終わるとCTEも消える
-```
-
-| 比較項目 | CTE | VIEW |
-|----------|-----|------|
-| 保存場所 | クエリ内（一時的） | データベース（永続的） |
-| スコープ | 1つのクエリの中のみ | どこからでも参照可能 |
-| 変更 | クエリを書き換えるだけ | ALTER/DROP VIEWが必要 |
-| 権限管理 | なし | VIEWに権限を付与できる |
-| 再帰 | WITH RECURSIVE が使える | 通常のVIEWは再帰不可 |
-
-> **ポイント**  
-> 「このクエリの中だけで使う一時的な整理」にはCTE、「チームで共有して繰り返し使うクエリ」にはVIEWが向いています。VIEWの詳細はlesson12で学びます。
-
----
-
-## 7. 再帰CTE（WITH RECURSIVE）の概念
-
-### 再帰CTEとは
-
-**再帰CTE**は、CTE自身が自分自身を参照することで、階層構造（ツリー）を繰り返し辿る仕組みです。組織ツリー、カテゴリ階層、ファイルシステムなどのデータを扱うときに非常に強力です。
-
-イメージとしては「数字を1から10まで順番に数える」ときに「前の数字に1を足す」という操作を繰り返すような感覚です。
-
-再帰CTEは必ず2つの部分から構成されます：
-1. **アンカー部分**：再帰の起点（最初の行）
-2. **再帰部分**：前の結果を使って次の行を生成する
-
----
-
-## 8. 再帰CTEの構文（アンカー部分 + 再帰部分）
+INNER JOIN は **両テーブルに一致する行のみ** を返します。
 
 ### 基本構文
 
 ```sql
-WITH RECURSIVE cte_name AS (
-    -- アンカー部分（再帰の起点）
-    SELECT ...初期値...
-
-    UNION ALL
-
-    -- 再帰部分（cte_nameを参照して次の行を生成）
-    SELECT ...
-    FROM cte_name
-    WHERE ...終了条件...
-)
-SELECT * FROM cte_name;
+SELECT 列名
+FROM テーブルA
+INNER JOIN テーブルB ON テーブルA.結合キー = テーブルB.結合キー;
 ```
 
-### 1から10までの数字を生成する例
+`INNER` は省略可能です。`JOIN` だけでも INNER JOIN として動作します。
+
+### 例：顧客名と注文を一緒に取得する
 
 ```sql
-WITH RECURSIVE numbers AS (
-    -- アンカー: 最初の値
-    SELECT 1 AS n
-
-    UNION ALL
-
-    -- 再帰: 前の値に1を足す
-    SELECT n + 1
-    FROM numbers
-    WHERE n < 10  -- 終了条件（これがないと無限ループ！）
-)
-SELECT n FROM numbers;
-```
-
-### 組織ツリーを辿る再帰CTE
-
-```sql
--- 社長（id=1）から全部下を取得する
-WITH RECURSIVE org_tree AS (
-    -- アンカー: 社長から始める
-    SELECT
-        emp_id,
-        emp_name,
-        manager_id,
-        0 AS depth,           -- 階層の深さ
-        emp_name AS path      -- 所属パス
-    FROM employees
-    WHERE emp_id = 1          -- 社長のIDを指定
-
-    UNION ALL
-
-    -- 再帰: 直属の部下を追加していく
-    SELECT
-        e.emp_id,
-        e.emp_name,
-        e.manager_id,
-        ot.depth + 1,
-        ot.path || ' > ' || e.emp_name  -- パスを連結
-    FROM employees e
-    INNER JOIN org_tree ot ON e.manager_id = ot.emp_id
-)
 SELECT
-    emp_id,
-    REPEAT('  ', depth) || emp_name AS indented_name,  -- インデントで階層表現
-    depth,
-    path
-FROM org_tree
-ORDER BY path;
+    orders.id          AS order_id,
+    customers.name     AS customer_name,
+    orders.product,
+    orders.amount
+FROM orders
+INNER JOIN customers ON orders.customer_id = customers.id;
 ```
 
-**結果イメージ**
+実行結果：
 
-| emp_id | indented_name     | depth | path                           |
-|--------|-------------------|-------|--------------------------------|
-| 1      | 社長 山田         | 0     | 社長 山田                      |
-| 2      | 　部長 鈴木       | 1     | 社長 山田 > 部長 鈴木           |
-| 3      | 　部長 田中       | 1     | 社長 山田 > 部長 田中           |
-| 4      | 　　課長 佐藤     | 2     | 社長 山田 > 部長 鈴木 > 課長 佐藤 |
+| order_id | customer_name | product | amount |
+|----------|--------------|---------|--------|
+| 1        | 田中 太郎    | りんご  | 1500   |
+| 2        | 田中 太郎    | バナナ  | 800    |
+| 3        | 鈴木 花子    | みかん  | 1200   |
+| 4        | 山田 次郎    | ぶどう  | 3000   |
+
+注目点：
+- 佐藤 三郎（id=104）は注文がないため、結果に含まれません
+- customer_id=999 の注文（id=5）は customers に存在しないため、結果に含まれません
 
 > **ポイント**  
-> `WITH RECURSIVE` は、同じCTEを自己参照するため **UNION ALL** で接続します。アンカー部分が最初の行を生成し、再帰部分が終了条件を満たすまで繰り返し実行されます。
+> INNER JOIN は「両テーブルに対応するレコードがある行のみ」返します。  
+> どちらかにしか存在しない行は結果から除外されます。
+
+> **現場メモ**  
+> INNER JOIN を使うということは「両テーブルに必ずデータが存在する」という前提を置くことになります。あるプロジェクトで「ユーザーは必ずプロフィールを持つはず」と INNER JOIN を使っていたところ、プロフィール未設定のユーザーがレポートから完全に消えていたインシデントがありました。本番データは「あるはず」が崩れることがあります。INNER JOIN を選ぶ際は「本当に両テーブルに対応するデータが保証されているか」をスキーマと運用の両面で確認することをお勧めします。
 
 ---
 
-## 9. 再帰CTEの使い所（組織ツリー・カテゴリ階層）
+## 4. テーブルエイリアスの使い方
 
-### カテゴリ階層の展開
-
-```sql
-CREATE TABLE categories (
-    cat_id    INT PRIMARY KEY,
-    cat_name  TEXT,
-    parent_id INT
-);
-
-INSERT INTO categories VALUES
-    (1, '全商品',   NULL),
-    (2, '食品',     1),
-    (3, '電子機器', 1),
-    (4, '野菜',     2),
-    (5, '果物',     2),
-    (6, 'スマホ',   3),
-    (7, 'PC',       3),
-    (8, 'にんじん', 4),
-    (9, 'りんご',   5);
-
--- 「果物」カテゴリ以下の全商品を取得
-WITH RECURSIVE cat_tree AS (
-    -- アンカー: 「果物」から始める
-    SELECT cat_id, cat_name, parent_id, 0 AS depth
-    FROM categories
-    WHERE cat_name = '果物'
-
-    UNION ALL
-
-    -- 再帰: 子カテゴリを追加
-    SELECT c.cat_id, c.cat_name, c.parent_id, ct.depth + 1
-    FROM categories c
-    INNER JOIN cat_tree ct ON c.parent_id = ct.cat_id
-)
-SELECT cat_id, cat_name, depth
-FROM cat_tree
-ORDER BY depth, cat_id;
-```
-
-### 祖先を辿る（下から上へ）
+テーブル名が長い場合、毎回フルネームを書くのは大変です。  
+`AS` を使って短い別名（エイリアス）を付けられます。
 
 ```sql
--- 「一般 渡辺」（id=6）から社長までの経路を辿る
-WITH RECURSIVE ancestors AS (
-    SELECT emp_id, emp_name, manager_id
-    FROM employees
-    WHERE emp_id = 6  -- 渡辺から開始
-
-    UNION ALL
-
-    SELECT e.emp_id, e.emp_name, e.manager_id
-    FROM employees e
-    INNER JOIN ancestors a ON e.emp_id = a.manager_id
-)
-SELECT emp_id, emp_name
-FROM ancestors;
+-- AS を使ったエイリアス（AS は省略可能）
+SELECT
+    o.id          AS order_id,
+    c.name        AS customer_name,
+    o.product,
+    o.amount
+FROM orders AS o
+INNER JOIN customers AS c ON o.customer_id = c.id;
 ```
+
+`AS` は省略できます（`orders o` と書いても同じです）。
 
 > **ポイント**  
-> 再帰CTEは「子から親方向」も「親から子方向」も自在に辿れます。JOINの向きを変えるだけで両方向の探索が可能です。
+> テーブルエイリアスは JOIN を使うクエリで特によく使います。  
+> `u`（users）、`o`（orders）、`p`（products）のように、  
+> テーブル名の頭文字を使うのが慣習です。
+
+> **現場メモ**  
+> エイリアスの命名はチームで統一することを強くお勧めします。あるチームでは `c` が customers を指すと思ったら contracts を指していた、という混乱が実際に起きました。筆者のチームでは「テーブルの頭文字2〜3文字を使う（customers → cu、contracts → co）」というルールにしてから、読み間違いが大幅に減りました。また、エイリアスを使わずにテーブルのフルネームで書いたクエリは、JOIN が2〜3個になった途端に読みにくくなります。新しい JOIN を追加するタイミングでエイリアスを導入しておくのが良い習慣です。
 
 ---
 
-## 10. よくあるミス（無限再帰の防止）
+## 5. ON 句の書き方
 
-### ミス1: 終了条件を書き忘れる
-
-```sql
--- 危険な例: WHERE条件なしで無限ループ
--- WITH RECURSIVE infinite AS (
---     SELECT 1 AS n
---     UNION ALL
---     SELECT n + 1 FROM infinite  -- 永遠に増え続ける！
--- )
--- SELECT * FROM infinite;
-
--- 正しい例: 必ず終了条件を書く
-WITH RECURSIVE safe AS (
-    SELECT 1 AS n
-    UNION ALL
-    SELECT n + 1 FROM safe WHERE n < 100  -- 100で止まる
-)
-SELECT * FROM safe;
-```
-
-### ミス2: 循環参照データでの無限ループ
+ON 句には結合条件を書きます。基本は「外部キー = 主キー」ですが、複数条件も書けます。
 
 ```sql
--- データに循環がある場合（A→B→C→A のような参照）は無限ループになる
--- 対策: 訪問済みIDを配列で追跡する
-WITH RECURSIVE safe_traverse AS (
-    SELECT emp_id, manager_id, ARRAY[emp_id] AS visited
-    FROM employees
-    WHERE emp_id = 1
+-- 基本：外部キー = 主キー
+FROM orders AS o
+INNER JOIN customers AS c ON o.customer_id = c.id
 
-    UNION ALL
+-- 複数条件（AND で繋ぐ）
+FROM order_details AS od
+INNER JOIN products AS p
+    ON od.product_id = p.id
+    AND od.version   = p.version
 
-    SELECT e.emp_id, e.manager_id, st.visited || e.emp_id
-    FROM employees e
-    INNER JOIN safe_traverse st ON e.manager_id = st.emp_id
-    WHERE NOT (e.emp_id = ANY(st.visited))  -- 訪問済みは除外
-)
-SELECT emp_id FROM safe_traverse;
-```
-
-### ミス3: UNION と UNION ALL の間違い
-
-```sql
--- 再帰CTEではUNION ALL を使う（UNION は各ステップで重複除去するため遅い）
--- また、論理的に重複がない場合はUNION ALLで問題ない
-WITH RECURSIVE tree AS (
-    SELECT emp_id, emp_name, 0 AS depth FROM employees WHERE emp_id = 1
-    UNION ALL  -- UNION（ALL なし）にすると毎回重複チェックが走って遅くなる
-    SELECT e.emp_id, e.emp_name, t.depth + 1
-    FROM employees e INNER JOIN tree t ON e.manager_id = t.emp_id
-)
-SELECT * FROM tree;
-```
-
-### PostgreSQLの再帰深度制限
-
-```sql
--- デフォルトでは再帰深度に制限がある
--- 深いツリーを辿る場合は設定を変更するか、終了条件を確認する
--- PostgreSQLでは max_recursive_depth のような設定はないが、
--- WHEREの終了条件で深さを制限するのが一般的
-WITH RECURSIVE bounded_tree AS (
-    SELECT emp_id, emp_name, 0 AS depth FROM employees WHERE emp_id = 1
-    UNION ALL
-    SELECT e.emp_id, e.emp_name, t.depth + 1
-    FROM employees e
-    INNER JOIN bounded_tree t ON e.manager_id = t.emp_id
-    WHERE t.depth < 10  -- 最大10階層まで
-)
-SELECT * FROM bounded_tree;
+-- 不等号も使える（通常の JOIN ではあまり使わない）
+FROM a
+INNER JOIN b ON a.value BETWEEN b.min_val AND b.max_val
 ```
 
 > **注意**  
-> 再帰CTEで無限ループが発生するとクエリが終わらなくなります。必ず終了条件を書き、データに循環参照がある場合は訪問済みチェックを追加しましょう。開発中は `WHERE depth < 5` のように浅い制限で動作を確認してから条件を調整するのが安全です。
+> ON 句に条件を書くと、JOIN の段階で絞り込まれます。  
+> これは WHERE 句で絞り込むのと似ていますが、LEFT JOIN では挙動が変わります（後述）。
 
 ---
 
-## 11. PRレビューのチェックポイント
+## 6. LEFT JOIN
 
-- [ ] **3段以上のネストしたサブクエリがあれば CTE への書き換えを提案する**
-  - ネストが深いほどデバッグが難しく、レビューでの意図把握も困難になる
-- [ ] **同じサブクエリを複数箇所で繰り返し書いていないか**
-  - CTE に切り出して1箇所で定義する
-- [ ] **再帰 CTE に LIMIT / `max_recursion_depth` の対策があるか**
-  - 循環参照データや終了条件の漏れで無限ループになる可能性を確認
-- [ ] **複雑な CTE を書いた場合、各ステップを単独で実行して中間結果を確認したか**
-  - CTE のデバッグ方法としてブロックを個別に SELECT する手順を知っているか
+LEFT JOIN は **左テーブル（FROM に書いたテーブル）の全行を返し**、  
+右テーブルに一致する行がない場合は NULL で補完します。
+
+### 構文
+
+```sql
+SELECT 列名
+FROM テーブルA           -- 左テーブル（全行返る）
+LEFT JOIN テーブルB ON テーブルA.キー = テーブルB.キー;
+```
+
+### 例：注文のない顧客も含めて全顧客を取得する
+
+```sql
+SELECT
+    c.id           AS customer_id,
+    c.name         AS customer_name,
+    o.id           AS order_id,
+    o.product,
+    o.amount
+FROM customers AS c
+LEFT JOIN orders AS o ON c.id = o.customer_id;
+```
+
+実行結果：
+
+| customer_id | customer_name | order_id | product | amount |
+|-------------|--------------|----------|---------|--------|
+| 101         | 田中 太郎    | 1        | りんご  | 1500   |
+| 101         | 田中 太郎    | 2        | バナナ  | 800    |
+| 102         | 鈴木 花子    | 3        | みかん  | 1200   |
+| 103         | 山田 次郎    | 4        | ぶどう  | 3000   |
+| 104         | 佐藤 三郎    | NULL     | NULL    | NULL   |
+
+佐藤 三郎（注文なし）も結果に含まれ、orders 側の列は NULL になっています。
+
+### 注文のない顧客だけを絞り込む
+
+LEFT JOIN で NULL になった行を WHERE で絞ることで、「対応データがない行」だけを抽出できます。
+
+```sql
+-- 一度も注文していない顧客を抽出
+SELECT
+    c.id   AS customer_id,
+    c.name AS customer_name
+FROM customers AS c
+LEFT JOIN orders AS o ON c.id = o.customer_id
+WHERE o.id IS NULL;   -- 右テーブルの主キーが NULL = 一致なし
+```
+
+実行結果：
+
+| customer_id | customer_name |
+|-------------|--------------|
+| 104         | 佐藤 三郎    |
+
+> **ポイント**  
+> `LEFT JOIN ... WHERE 右テーブルの列 IS NULL` というパターンは  
+> 「A にあって B にない行」を取得する定番テクニックです。  
+> 覚えておきましょう。
+
+> **現場メモ**  
+> 新しいメンバーが INNER JOIN を使うべき場面で LEFT JOIN を使い、NULL 行がレポートに混入するバグがありました。逆に「確実に存在するはず」と思って INNER JOIN を使ったら、稀に存在しないデータがあってレコードが消えるバグも見ています。「どちらのテーブルにデータが欠ける可能性があるか」を意識するのが大事です。面接でも「INNER JOIN と LEFT JOIN の違いは何ですか、どう使い分けますか」という質問はよく出ます。答えるときは「テーブルにデータが必ず存在するかどうか」という観点で説明すると説得力が出ます。
 
 ---
 
-## 12. まとめ
+## 7. RIGHT JOIN
+
+RIGHT JOIN は LEFT JOIN と左右対称で、**右テーブルの全行を返します**。
+
+```sql
+-- LEFT JOIN で書き直せる
+SELECT c.name, o.product
+FROM customers AS c
+RIGHT JOIN orders AS o ON c.id = o.customer_id;
+
+-- 上と同じ結果（LEFT JOIN で書き直し）
+SELECT c.name, o.product
+FROM orders AS o
+LEFT JOIN customers AS c ON o.customer_id = c.id;
+```
+
+> **ポイント**  
+> RIGHT JOIN は LEFT JOIN でテーブルの順番を入れ替えることで表現できます。  
+> そのため、コードの可読性を統一するために **LEFT JOIN だけを使う** という規約を持つ  
+> チームが多いです。実務では RIGHT JOIN よりも LEFT JOIN の方が圧倒的によく使われます。
+
+---
+
+## 8. 結合で行が増える罠（1対多の JOIN）
+
+1対多のリレーションで JOIN すると、行数が増えることがあります。  
+これは意図した動作の場合もありますが、集計を誤る原因になることもあります。
+
+### 例：1人の顧客が複数の注文を持つ場合
+
+```sql
+-- 田中 太郎（id=101）は2件の注文がある
+SELECT c.name, o.product, o.amount
+FROM customers AS c
+INNER JOIN orders AS o ON c.id = o.customer_id
+WHERE c.id = 101;
+```
+
+| name      | product | amount |
+|-----------|---------|--------|
+| 田中 太郎 | りんご  | 1500   |
+| 田中 太郎 | バナナ  | 800    |
+
+`customers` では1行だった田中 太郎が、JOIN 後は2行になっています。
+
+### 集計で誤るパターン
+
+```sql
+-- NG：JOIN 後に SUM すると行が増えた分だけ合計が変わる（意図した結果になるが要注意）
+SELECT
+    c.name,
+    SUM(o.amount) AS total_amount
+FROM customers AS c
+INNER JOIN orders AS o ON c.id = o.customer_id
+GROUP BY c.name;
+```
+
+これ自体は正しいですが、さらに別の JOIN を重ねると意図せず行が「爆発的」に増えることがあります。
+
+> **注意**  
+> JOIN を追加するたびに、結果の行数がどう変わるかを意識しましょう。  
+> 「なぜか集計値がおかしい」と感じたら、まず JOIN 後の行数を COUNT(*) で確認してください。
+
+> **現場メモ**  
+> 1対多の JOIN が絡む集計バグは、筆者が見てきた中でも特に発見が遅れやすいバグです。「顧客ごとの購入合計金額」を出すクエリに、後からタグ付けテーブルを JOIN したところ、1つの注文に複数のタグが付いていたため行数が倍増し、集計額が2倍になっていたという事例があります。数値がおかしいと気づくまでに数日かかりました。JOIN を追加するたびに `SELECT COUNT(*) FROM ...` で行数を確認する習慣を身につけることを強くお勧めします。
+
+---
+
+## 9. JOIN と WHERE の違い（ON 条件と WHERE 条件）
+
+ON 句の条件と WHERE 句の条件は、**LEFT JOIN を使うときに挙動が異なります**。
+
+### ON に条件を書いた場合（LEFT JOIN では全行残る）
+
+```sql
+-- ON に条件を書く → LEFT JOIN なので customers の全行が残る
+SELECT c.name, o.product, o.amount
+FROM customers AS c
+LEFT JOIN orders AS o
+    ON c.id = o.customer_id
+    AND o.amount >= 2000;   -- ON に条件
+```
+
+実行結果：
+
+| name      | product | amount |
+|-----------|---------|--------|
+| 田中 太郎 | NULL    | NULL   |
+| 鈴木 花子 | NULL    | NULL   |
+| 山田 次郎 | ぶどう  | 3000   |
+| 佐藤 三郎 | NULL    | NULL   |
+
+LEFT JOIN なので customers の全行が返ります。  
+`amount >= 2000` の条件は「どの orders 行を結合するか」にのみ影響します。
+
+### WHERE に条件を書いた場合（全行には戻らない）
+
+```sql
+-- WHERE に条件を書く → INNER JOIN と同じ動作になる
+SELECT c.name, o.product, o.amount
+FROM customers AS c
+LEFT JOIN orders AS o ON c.id = o.customer_id
+WHERE o.amount >= 2000;   -- WHERE に条件
+```
+
+実行結果：
+
+| name      | product | amount |
+|-----------|---------|--------|
+| 山田 次郎 | ぶどう  | 3000   |
+
+WHERE で絞り込まれるため、`amount` が NULL（注文なし）の行も除外されてしまいます。  
+事実上 INNER JOIN と同じ動作になります。
+
+> **注意**  
+> LEFT JOIN を使う目的が「右テーブルに一致しない行も含めたい」なら、  
+> 右テーブルへの絞り込み条件は **ON に書く** のが正しい書き方です。  
+> WHERE に書くと LEFT JOIN の意味がなくなります。
+
+> **現場メモ**  
+> これは筆者がレビューで最もよく指摘する誤りの一つです。「LEFT JOIN を使っているのに WHERE 句に右テーブルの条件がある」というコードを見たら、意図通りか必ず確認してください。書いた本人は「LEFT JOIN にしたのになぜ NULL 行が出ないんだろう」と悩んでいることが多いです。また、仕様変更で INNER JOIN を LEFT JOIN に変えたとき、WHERE 句の条件を ON に移動し忘れてバグが残る事例も経験しました。JOIN の種類を変える際は WHERE 句も一緒に見直す習慣をつけてください。
+
+---
+
+## 10. USING 句
+
+結合するキー列の **名前が両テーブルで同じ** 場合、`USING` 句で簡潔に書けます。
+
+```sql
+-- ON を使った書き方
+SELECT o.id, c.name, o.product
+FROM orders AS o
+INNER JOIN customers AS c ON o.customer_id = c.customer_id;
+
+-- USING を使った書き方（結合列名が同じ場合のみ）
+SELECT o.id, c.name, o.product
+FROM orders AS o
+INNER JOIN customers AS c USING (customer_id);
+```
+
+> **ポイント**  
+> USING を使うと、結合列が結果に1列だけ現れます（重複しません）。  
+> ON を使うと両テーブルの列が別々に存在します。  
+> チームのコーディング規約に合わせて使い分けましょう。
+
+---
+
+## 11. よくあるミスと対処法
+
+### ミス1：JOIN で行が増えることに気づかない
+
+```sql
+-- orders に複数行ある場合、customers の行が増えて見える
+SELECT COUNT(*) FROM customers;               -- 4行
+SELECT COUNT(*) FROM customers
+INNER JOIN orders ON customers.id = orders.customer_id;  -- 4行より多くなる
+```
+
+**対処法：** JOIN 後に行数を確認する。  
+集計クエリがおかしいと感じたら `SELECT COUNT(*)` で行数を確認しましょう。
+
+### ミス2：テーブル名を付けずに列名が曖昧になる
+
+```sql
+-- NG：id がどちらのテーブルの id か不明（エラーになる）
+SELECT id, name, product
+FROM customers
+INNER JOIN orders ON customers.id = orders.customer_id;
+-- ERROR: column reference "id" is ambiguous
+```
+
+**対処法：** テーブルエイリアスを使って列名を明示する。
+
+```sql
+-- OK
+SELECT c.id, c.name, o.product
+FROM customers AS c
+INNER JOIN orders AS o ON c.id = o.customer_id;
+```
+
+### ミス3：LEFT JOIN が INNER JOIN になってしまう
+
+```sql
+-- NG：WHERE に右テーブルの列の条件を書くと LEFT JOIN の意味がなくなる
+SELECT c.name, o.product
+FROM customers AS c
+LEFT JOIN orders AS o ON c.id = o.customer_id
+WHERE o.order_date > '2024-01-01';   -- 注文なし顧客（NULL）も除外される
+```
+
+**対処法：** 「右テーブルのない行も含めたい」なら条件は ON に書く。
+
+```sql
+-- OK
+SELECT c.name, o.product
+FROM customers AS c
+LEFT JOIN orders AS o
+    ON c.id = o.customer_id
+    AND o.order_date > '2024-01-01';
+```
+
+### ミス4：ON の条件が逆になって全行マッチしてしまう（デカルト積）
+
+```sql
+-- NG：ON 条件を忘れた場合（カンマ結合の古い書き方も同様）
+SELECT c.name, o.product
+FROM customers, orders;   -- 全組み合わせが返る（4×5=20行）
+```
+
+**対処法：** 必ず JOIN の ON 句を正しく書く。  
+結果行数が急激に増えた場合はデカルト積（クロス結合）を疑いましょう。
+
+---
+
+## 12. 現場での使い分け
+
+JOIN の種類を選ぶ際に、現場で筆者が使っている判断フローを紹介します。
+
+### INNER JOIN を選ぶとき
+
+- 結合先テーブルにデータが必ず存在することがスキーマ（外部キー制約など）で保証されている
+- 結合先にデータがない行は結果に含めたくない（含めると意味をなさない）
+- 例：注文と商品マスタを結合するとき（商品マスタに存在しない商品は注文できない設計）
+
+### LEFT JOIN を選ぶとき
+
+- 結合先テーブルにデータがない可能性がある
+- NULL でもよいので左テーブルの全行を保持したい
+- 例：ユーザーと設定テーブルを結合するとき（設定を一度もしていないユーザーも取得したい）
+- 例：未購入ユーザーを含むレポートを出したいとき
+
+### 判断に迷ったら
+
+LEFT JOIN を選んでおく方が安全です。INNER JOIN はデータの欠損があると行が消えるため、本番データの揺れに対して LEFT JOIN の方が壊れにくいクエリになります。ただし NULL が混入することを意識した実装（NULL チェックや COALESCE）が必要です。
+
+---
+
+## 13. ポイント
+
+JOIN を含む SQL をレビューするときに確認すべき観点をまとめます。自分が書いたクエリのセルフレビューにも使えます。
+
+### 結合の種類
+
+- INNER JOIN と LEFT JOIN の選択は意図的か？「なぜ INNER JOIN（または LEFT JOIN）を使ったか」を説明できるか
+- LEFT JOIN を使っているのに WHERE 句に右テーブルの NULL になりうる列の条件がないか（意図せず INNER JOIN 化していないか）
+- RIGHT JOIN を使っているなら LEFT JOIN に書き直せないか（可読性の統一）
+
+### 行数・集計
+
+- 1対多の JOIN を含む場合、行が増えることを意図しているか
+- 集計（SUM / COUNT / AVG）を使っている場合、JOIN 後の行数が正しいか確認したか
+- 複数の1対多 JOIN が重なっていて行数が爆発していないか
+
+### 可読性
+
+- テーブルエイリアスはチームの命名規則に沿っているか
+- エイリアスが省略されている箇所はなく、すべての列に `テーブル名.列名` または `エイリアス.列名` が付いているか
+- JOIN が3つ以上ある場合、CTE に分割して読みやすくできないか（lesson9 参照）
+
+### ON 句
+
+- ON 句の結合条件は正しいキーで結合しているか
+- 誤った ON 条件や ON 句の書き忘れによってデカルト積が発生していないか
+
+---
+
+## 14. まとめ
 
 | テーマ | 要点 |
 | --- | --- |
-| CTEとは | WITH句で定義する一時的な名前付き結果セット |
-| 基本構文 | `WITH name AS (SELECT ...) SELECT * FROM name` |
-| メリット | 複雑なクエリを段階的に分解して可読性を上げる |
-| 複数CTE | カンマ区切りで複数定義可能。後のCTEは前のCTEを参照できる |
-| CTE vs サブクエリ | 複雑・複数回参照にはCTE、シンプルな1回にはサブクエリ |
-| CTE vs VIEW | CTEは一時的（クエリ内のみ）、VIEWは永続的（DB保存） |
-| 再帰CTEの仕組み | アンカー部分（起点）+ UNION ALL + 再帰部分 |
-| 再帰CTEの用途 | 組織ツリー・カテゴリ階層・パス探索 |
-| 無限再帰の防止 | 必ず終了条件（WHERE depth < N）を書く |
+| JOIN の目的 | 正規化されたテーブルを外部キーで結合し、まとめて取得する |
+| INNER JOIN | 両テーブルに一致する行のみ返す。どちらかに存在しない行は除外 |
+| LEFT JOIN | 左テーブルの全行を返す。右テーブルに一致しない場合は NULL |
+| RIGHT JOIN | 右テーブルの全行を返す。LEFT JOIN の左右入れ替えで代替可能 |
+| テーブルエイリアス | AS で短い別名を付ける。複数テーブルのクエリで可読性が上がる |
+| ON 句 | 結合条件を書く場所。LEFT JOIN では ON の条件は結合行の選択のみに影響 |
+| WHERE 句 | 結合後の全行に適用。LEFT JOIN + WHERE は事実上 INNER JOIN になることがある |
+| USING 句 | 結合列名が同じとき使える簡潔な書き方 |
+| 行が増える罠 | 1対多の JOIN では行が増える。集計がおかしいと感じたら行数を確認 |
+| よくあるミス | 列名の曖昧さ / WHERE で LEFT JOIN を無効化 / デカルト積 |
+| 現場での使い分け | 結合先データが保証されているなら INNER JOIN、不確かなら LEFT JOIN |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS employees (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT    NOT NULL,
+  manager_id INTEGER
+);
+DELETE FROM employees;
+INSERT INTO employees (id, name, manager_id) VALUES
+  (1, '社長',  NULL),
+  (2, '部長A',    1),
+  (3, '部長B',    1),
+  (4, '課長A',    2),
+  (5, '課長B',    3),
+  (6, '一般A',    4);
+
+CREATE TABLE IF NOT EXISTS customers (
+  id   INTEGER PRIMARY KEY,
+  name TEXT    NOT NULL
+);
+DELETE FROM customers;
+INSERT INTO customers (id, name) VALUES
+  (1, '田中'), (2, '鈴木'), (3, '佐藤'), (4, '山田');
+
+CREATE TABLE IF NOT EXISTS orders (
+  id          INTEGER PRIMARY KEY,
+  customer_id INTEGER NOT NULL
+);
+DELETE FROM orders;
+INSERT INTO orders (id, customer_id) VALUES
+  (1, 1), (2, 1), (3, 2);
+```
+
+### 問題1: 自己結合で部下と上司の名前を取得
+
+> 参照：[3. INNER JOIN の構文と動作](#3-inner-join-の構文と動作)
+
+`employees` テーブルを自己結合して、各社員の名前とその上司の名前を取得してください。上司がいない（manager_id が NULL）社員も含めてください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT
+  e.name        AS employee_name,
+  m.name        AS manager_name
+FROM employees AS e
+LEFT JOIN employees AS m ON e.manager_id = m.id;
+```
+
+**解説：** 同じ `employees` テーブルに別々のエイリアス（`e`=部下、`m`=上司）を付けて結合します。`LEFT JOIN` にすることで社長のように manager_id が NULL の行も結果に残ります（manager_name は NULL）。
+
+</details>
+
+### 問題2: アンチジョインで注文していない顧客を取得
+
+> 参照：[6. LEFT JOIN](#6-left-join) ・ [9. JOIN と WHERE の違い](#9-join-と-where-の違いon-条件と-where-条件)
+
+一度も注文していない `customers` を LEFT JOIN + IS NULL を使って取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT c.id, c.name
+FROM customers AS c
+LEFT JOIN orders AS o ON c.id = o.customer_id
+WHERE o.id IS NULL;
+```
+
+**解説：** LEFT JOIN で全顧客を残した後、`WHERE o.id IS NULL` で「orders に対応行がない顧客」だけを絞ります。これをアンチジョインと呼びます。`NOT IN (SELECT customer_id FROM orders)` でも実現できますが、NULL が混入すると結果が空になるリスクがあるためこちらが安全です。
+
+</details>
+
+### 問題3: FULL OUTER JOIN でマスタとの差分確認
+
+> 参照：[6. LEFT JOIN](#6-left-join) ・ [8. 結合で行が増える罠](#8-結合で行が増える罠1対多の-join)
+
+`customers` と `orders` を FULL OUTER JOIN して、顧客テーブルにも注文テーブルにも対応がない行（片側にしかない行）を確認してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT c.id AS customer_id, c.name, o.id AS order_id
+FROM customers AS c
+FULL OUTER JOIN orders AS o ON c.id = o.customer_id
+WHERE c.id IS NULL OR o.id IS NULL;
+```
+
+**解説：** `FULL OUTER JOIN` は両テーブルの全行を保持し、対応がない側を NULL で埋めます。`WHERE c.id IS NULL` は orders にあるが customers にない行（孤立データ）、`o.id IS NULL` は customers にあるが orders にない行（未注文顧客）をそれぞれ表します。
+
+</details>

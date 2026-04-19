@@ -1,547 +1,655 @@
-# VIEW
-VIEWで複雑なSELECTに名前をつけ、再利用可能にします
+# JOIN応用
+FULL OUTER JOIN・CROSS JOIN・複数テーブルのJOIN・自己結合を学びます
 
 ## 本章の目標
 
 本章では以下を目標にして学習します。
 
-- VIEWとは何かを説明できること
-- CREATE VIEWで仮想テーブルを作成・管理できること
-- VIEWのメリット（再利用性・セキュリティ）を理解できること
-- 通常VIEWとマテリアライズドビューの違いを理解できること
-- VIEWの使いすぎによるパフォーマンス問題を把握できること
+- FULL OUTER JOINを使って両テーブルの全行を取得できること
+- CROSS JOINで全組み合わせを生成できること
+- 3テーブル以上を結合したクエリを書けること
+- 自己結合で親子・上司部下のような階層関係を表現できること
+- アンチジョインでどちらかのテーブルにしかないレコードを見つけられること
 
 ---
 
-## 1. VIEWとは（仮想テーブル）
+## 1. FULL OUTER JOIN（両テーブルの全行を取得）
 
-### VIEWの概念
+### FULL OUTER JOINとは
 
-**VIEW（ビュー）**は、SELECTクエリに名前をつけてデータベースに保存したものです。実際のデータを持たず、参照されるたびに元のSELECTが実行されます。そのため「**仮想テーブル**」とも呼ばれます。
+INNER JOINは「両方のテーブルに存在する行」だけを返します。LEFT JOINは「左テーブルの全行 + 右テーブルにマッチした行」を返します。  
+では「**両方のテーブルの全行**」を取得したい場合はどうするか？それが **FULL OUTER JOIN** です。
 
-身近な例で例えると、図書館の「新着本コーナー」のようなものです。実際に本が移動しているわけではなく、「新着の本を並べた棚」というラベルが付いた参照先に過ぎません。でも利用者はその棚を見るだけで目的の本を探せます。
+イメージとしては「左のテーブルにしかない行も、右のテーブルにしかない行も、すべてひとまとめにして返す」という結合です。マッチしなかった側はNULLで埋められます。
 
 ```sql
 -- テーブル準備
-CREATE TABLE products (
-    product_id   INT PRIMARY KEY,
-    product_name TEXT,
-    category     TEXT,
-    price        INT,
-    stock        INT
+CREATE TABLE employees (
+    id   INT PRIMARY KEY,
+    name TEXT
 );
 
-CREATE TABLE order_details (
-    detail_id  INT PRIMARY KEY,
-    product_id INT,
-    quantity   INT,
-    ordered_at TIMESTAMP DEFAULT NOW()
+CREATE TABLE departments (
+    id          INT PRIMARY KEY,
+    dept_name   TEXT,
+    employee_id INT
 );
 
-INSERT INTO products VALUES
-    (1, 'りんご',   '果物', 150, 100),
-    (2, 'みかん',   '果物', 100, 200),
-    (3, 'にんじん', '野菜',  80, 150),
-    (4, 'キャベツ', '野菜',  200, 80),
-    (5, 'バナナ',   '果物', 120, 50);
+INSERT INTO employees VALUES (1, '田中'), (2, '鈴木'), (3, '佐藤');
+INSERT INTO departments VALUES (10, '開発', 1), (20, '営業', 2), (30, '総務', NULL);
 
-INSERT INTO order_details VALUES
-    (1, 1, 3, '2024-03-01 10:00:00'),
-    (2, 2, 5, '2024-03-02 11:00:00'),
-    (3, 1, 2, '2024-03-03 09:00:00'),
-    (4, 3, 4, '2024-03-04 14:00:00'),
-    (5, 5, 1, '2024-03-05 16:00:00');
+-- FULL OUTER JOIN
+SELECT
+    e.id        AS emp_id,
+    e.name      AS emp_name,
+    d.dept_name
+FROM employees e
+FULL OUTER JOIN departments d ON e.id = d.employee_id;
 ```
 
+**結果イメージ**
+
+| emp_id | emp_name | dept_name |
+|--------|----------|-----------|
+| 1      | 田中     | 開発      |
+| 2      | 鈴木     | 営業      |
+| 3      | 佐藤     | NULL      |
+| NULL   | NULL     | 総務      |
+
 > **ポイント**  
-> VIEWはデータのコピーではありません。VIEWを参照するたびに元テーブルからデータが取得されるため、元テーブルのデータが変わればVIEWの結果も自動的に最新になります。
+> FULL OUTER JOINでは「どちらか一方にしかない行」がNULLを含んで返ります。佐藤は部署に割り当てられておらず、総務は担当社員がいないことが一目でわかります。
 
 ---
 
-## 2. CREATE VIEW の構文
+## 2. FULL OUTER JOINの使い所（差分確認）
 
-### VIEWを作成する
+### データの差分チェックに使う
 
-```sql
--- 基本構文
-CREATE VIEW ビュー名 AS
-SELECT ...;
-
--- 実例: 果物商品の一覧ビュー
-CREATE VIEW fruits_view AS
-SELECT product_id, product_name, price, stock
-FROM products
-WHERE category = '果物';
-
--- VIEWを使う（通常のテーブルと同じように使える）
-SELECT * FROM fruits_view;
-
--- VIEWに対してWHEREやORDER BYも使える
-SELECT product_name, price
-FROM fruits_view
-WHERE price > 110
-ORDER BY price DESC;
-```
-
-### 複雑なクエリにVIEWをつける
+FULL OUTER JOINの最も実用的な使い方は、**2つのテーブル間の差分を確認する**ことです。例えば「マスタテーブルと実績テーブルを比べて、どちらかにしか存在しないレコードを見つける」といった場面で活躍します。
 
 ```sql
--- 商品別の注文合計を計算する複雑なクエリ
-CREATE VIEW product_sales_summary AS
-SELECT
-    p.product_id,
-    p.product_name,
-    p.category,
-    p.price,
-    COALESCE(SUM(od.quantity), 0)        AS total_ordered,
-    COALESCE(SUM(od.quantity * p.price), 0) AS total_revenue
-FROM products p
-LEFT JOIN order_details od ON p.product_id = od.product_id
-GROUP BY p.product_id, p.product_name, p.category, p.price;
+-- 左テーブルにしかない行（部署に割り当てられていない社員）を取得
+SELECT e.id, e.name
+FROM employees e
+FULL OUTER JOIN departments d ON e.id = d.employee_id
+WHERE d.employee_id IS NULL AND e.id IS NOT NULL;
 
--- 作成後はシンプルに参照できる
-SELECT * FROM product_sales_summary ORDER BY total_revenue DESC;
+-- 右テーブルにしかない行（担当社員のいない部署）を取得
+SELECT d.dept_name
+FROM employees e
+FULL OUTER JOIN departments d ON e.id = d.employee_id
+WHERE e.id IS NULL AND d.id IS NOT NULL;
 ```
+
+### 実際のユースケース
+
+- 本番DB と バックアップDB の差分チェック
+- 古い顧客マスタと新しい顧客マスタの突き合わせ
+- 注文テーブルと請求テーブルの未消込チェック
 
 > **ポイント**  
-> VIEWを使うことで、複雑なJOINやGROUP BYを毎回書かずに済みます。SQLを書く人全員がこのVIEW名を使えば、計算ロジックを統一できます。
+> FULL OUTER JOINは「どちらかにしか存在しない行」を浮かび上がらせるのに便利です。WHERE句でNULL判定を組み合わせることで、片側のみのレコードを絞り込めます。
 
 ---
 
-## 3. CREATE OR REPLACE VIEW
+## 3. CROSS JOIN（直積、全組み合わせ）
 
-### 既存VIEWを更新する
+### CROSS JOINとは
 
-VIEWの定義を変更したい場合、`CREATE OR REPLACE VIEW` を使うと既存のVIEWを置き換えられます。
+CROSS JOINは「テーブルAの全行」×「テーブルBの全行」のすべての組み合わせを返します。数学でいう「直積（デカルト積）」です。
+
+ON句や結合条件を書かない点が他のJOINと大きく異なります。
 
 ```sql
--- 既存のVIEWを上書き更新
-CREATE OR REPLACE VIEW fruits_view AS
+-- 色テーブル
+CREATE TABLE colors (color TEXT);
+INSERT INTO colors VALUES ('赤'), ('青'), ('緑');
+
+-- サイズテーブル
+CREATE TABLE sizes (size TEXT);
+INSERT INTO sizes VALUES ('S'), ('M'), ('L');
+
+-- CROSS JOINで全組み合わせを生成
 SELECT
-    product_id,
-    product_name,
-    price,
-    stock,
-    price * stock AS inventory_value  -- 新しい列を追加
-FROM products
-WHERE category = '果物';
-
--- 確認
-SELECT * FROM fruits_view;
+    c.color,
+    s.size
+FROM colors c
+CROSS JOIN sizes s;
 ```
 
-### VIEWの定義を確認する
+**結果（3 × 3 = 9行）**
 
-```sql
--- VIEWの定義を確認
-SELECT definition
-FROM pg_views
-WHERE viewname = 'fruits_view';
-
--- または
-\d+ fruits_view  -- psqlコマンドラインツールの場合
-```
+| color | size |
+|-------|------|
+| 赤    | S    |
+| 赤    | M    |
+| 赤    | L    |
+| 青    | S    |
+| 青    | M    |
+| 青    | L    |
+| 緑    | S    |
+| 緑    | M    |
+| 緑    | L    |
 
 > **注意**  
-> `CREATE OR REPLACE VIEW` はWHERE句や列の追加は可能ですが、既存の列を削除したり型を変更したりはできません。その場合はいったん `DROP VIEW` してから再作成する必要があります。
-
----
-
-## 4. VIEWのメリット（複雑なクエリの隠蔽・セキュリティ）
-
-### メリット1: 複雑なクエリの隠蔽と再利用
-
-```sql
--- 毎回書くのが大変な複雑なクエリ
--- （JOINが多い、サブクエリが多い、計算が複雑など）
--- これをVIEWにすれば1行で使える
-
--- ビュー: 月次売上レポート（複雑な計算をカプセル化）
-CREATE VIEW monthly_sales_report AS
-SELECT
-    DATE_TRUNC('month', od.ordered_at) AS month,
-    p.category,
-    COUNT(DISTINCT od.detail_id) AS transaction_count,
-    SUM(od.quantity)              AS total_quantity,
-    SUM(od.quantity * p.price)    AS total_revenue,
-    AVG(od.quantity * p.price)    AS avg_order_value
-FROM order_details od
-INNER JOIN products p ON od.product_id = p.product_id
-GROUP BY DATE_TRUNC('month', od.ordered_at), p.category;
-
--- 利用は簡単
-SELECT * FROM monthly_sales_report
-WHERE month = '2024-03-01'
-ORDER BY total_revenue DESC;
-```
-
-### メリット2: セキュリティ（列・行の制限）
-
-```sql
--- 給与テーブル（機密情報を含む）
-CREATE TABLE salary_info (
-    emp_id     INT PRIMARY KEY,
-    emp_name   TEXT,
-    salary     INT,
-    bonus      INT,
-    bank_account TEXT  -- 機密情報
-);
-
-INSERT INTO salary_info VALUES
-    (1, '田中', 500000, 50000, '0001-001-1234567'),
-    (2, '鈴木', 600000, 60000, '0002-002-9876543');
-
--- 機密情報を除いたビューを作成
-CREATE VIEW safe_salary_view AS
-SELECT emp_id, emp_name, salary
-FROM salary_info;
--- bank_account は含めない！
-
--- 一般ユーザーにはビューだけアクセス権を与える
--- GRANT SELECT ON safe_salary_view TO general_user;
-
-SELECT * FROM safe_salary_view;  -- bank_accountは見えない
-```
-
-> **ポイント**  
-> VIEWはセキュリティ管理のツールとしても使えます。ユーザーに直接テーブルへのアクセスを与えず、必要な列・行だけを見せるVIEWへのアクセスのみ許可することで、情報漏洩リスクを下げられます。
-
----
-
-## 5. VIEWへのSELECT
-
-### VIEWは通常テーブルと同じように使える
-
-```sql
--- WHERE句
-SELECT product_name, total_revenue
-FROM product_sales_summary
-WHERE total_revenue > 500;
-
--- ORDER BY
-SELECT *
-FROM product_sales_summary
-ORDER BY total_ordered DESC
-LIMIT 3;
-
--- 別のVIEWやテーブルとJOINも可能
-SELECT
-    ps.product_name,
-    ps.total_revenue,
-    f.stock  -- fruitsビューのstock列
-FROM product_sales_summary ps
-INNER JOIN fruits_view f ON ps.product_id = f.product_id;
-
--- VIEWに対してCOUNTなどの集計も可能
-SELECT COUNT(*), AVG(total_revenue)
-FROM product_sales_summary;
-```
-
-> **ポイント**  
-> VIEWはSELECTの観点では通常テーブルと全く同じように扱えます。JOINすることも、WHERE/GROUP BY/ORDER BYを使うことも、別のVIEWのFROMに書くことも可能です。
-
----
-
-## 6. VIEWの更新（updatable viewの条件）
-
-### 更新可能なVIEW（Updatable View）
-
-VIEWに対してINSERT/UPDATE/DELETEを行うには、VIEWが**更新可能（updatable）**である必要があります。以下の条件をすべて満たす必要があります：
-
-- FROM句にテーブルが1つだけ（JOINなし）
-- DISTINCT なし
-- GROUP BY / HAVING なし
-- UNION / INTERSECT / EXCEPT なし
-- 集計関数（SUM, AVG等）なし
-- ウィンドウ関数なし
-- サブクエリが列参照を含まない
-
-```sql
--- 更新可能なシンプルなVIEW
-CREATE VIEW simple_fruits AS
-SELECT product_id, product_name, price, stock
-FROM products
-WHERE category = '果物';
-
--- VIEWを通じてUPDATE（元テーブルが変わる）
-UPDATE simple_fruits
-SET price = 180
-WHERE product_name = 'りんご';
-
--- 元テーブルを確認すると価格が変わっている
-SELECT * FROM products WHERE product_name = 'りんご';
-
--- VIEWを通じてINSERT
-INSERT INTO simple_fruits (product_id, product_name, price, stock)
-VALUES (6, 'ぶどう', 300, 30);
--- 注意: categoryが指定できないのでNULLになる
--- WITH CHECK OPTION を使うと条件外の挿入を防げる
-
--- WITH CHECK OPTIONで整合性を保つ
-CREATE OR REPLACE VIEW simple_fruits AS
-SELECT product_id, product_name, price, stock
-FROM products
-WHERE category = '果物'
-WITH CHECK OPTION;  -- category='果物'でない行の挿入を防ぐ
-```
-
-> **注意**  
-> JOINやGROUP BYを含む複雑なVIEWは更新不可です。更新可能かどうかを確認するには `pg_views` の `is_updatable` 列を参照できます。実務ではVIEWへの直接更新は避け、元テーブルを直接操作する方が安全です。
-
----
-
-## 7. DROP VIEW（CASCADE）
-
-### VIEWを削除する
-
-```sql
--- 基本的な削除
-DROP VIEW fruits_view;
-
--- VIEWが存在しない場合でもエラーを出さない
-DROP VIEW IF EXISTS fruits_view;
-
--- 依存するオブジェクト（他のVIEWや関数）も一緒に削除
-DROP VIEW fruits_view CASCADE;
--- 注意: CASCADEは依存先も削除するため慎重に使う
-
--- RESTRICT（デフォルト）: 依存先がある場合はエラー
-DROP VIEW fruits_view RESTRICT;
-
--- VIEWの一覧を確認
-SELECT viewname, viewowner
-FROM pg_views
-WHERE schemaname = 'public';
-```
-
-> **注意**  
-> `CASCADE` を使うと、そのVIEWを参照している他のVIEWや関数もすべて削除されます。本番環境では必ず依存関係を確認してから削除しましょう。
-
----
-
-## 8. マテリアライズドビュー（MATERIALIZED VIEW）の概念
-
-### 通常VIEWとの違い
-
-通常のVIEWは「参照するたびに元のSELECTを実行する仮想テーブル」ですが、**マテリアライズドビュー（MATERIALIZED VIEW）**は「クエリの結果を実際にディスクに保存する物理テーブル」です。
-
-| 比較項目 | 通常VIEW | マテリアライズドビュー |
-|----------|----------|----------------------|
-| データ保存 | しない（毎回クエリ実行） | する（結果をキャッシュ） |
-| 読み取り速度 | 元クエリの速度に依存 | 高速（保存済みデータを読む） |
-| 最新性 | 常に最新 | REFRESH時のみ更新 |
-| 書き込みオーバーヘッド | なし | REFRESHのコスト |
-| インデックス | 付けられない | 付けられる |
-
-```sql
--- マテリアライズドビューの作成
-CREATE MATERIALIZED VIEW product_sales_mat AS
-SELECT
-    p.product_id,
-    p.product_name,
-    p.category,
-    COALESCE(SUM(od.quantity), 0)           AS total_ordered,
-    COALESCE(SUM(od.quantity * p.price), 0) AS total_revenue
-FROM products p
-LEFT JOIN order_details od ON p.product_id = od.product_id
-GROUP BY p.product_id, p.product_name, p.category, p.price;
-
--- 参照（通常テーブルと同じ）
-SELECT * FROM product_sales_mat ORDER BY total_revenue DESC;
-
--- マテリアライズドビューにインデックスを追加できる
-CREATE INDEX idx_mat_category ON product_sales_mat (category);
-```
-
-> **ポイント**  
-> 重い集計クエリを毎回実行したくない場合、マテリアライズドビューに保存しておくと参照が高速になります。ただしデータは自動更新されないため、手動または定期的なREFRESHが必要です。
-
----
-
-## 9. マテリアライズドビューのリフレッシュ（REFRESH MATERIALIZED VIEW）
-
-### データを更新する
-
-```sql
--- 元テーブルのデータを変更
-INSERT INTO order_details VALUES (6, 4, 10, NOW());
-
--- マテリアライズドビューは自動更新されない（古いデータのまま）
-SELECT * FROM product_sales_mat WHERE product_id = 4;
-
--- REFRESHで手動更新
-REFRESH MATERIALIZED VIEW product_sales_mat;
-
--- 更新後に確認
-SELECT * FROM product_sales_mat WHERE product_id = 4;
-
--- REFRESH中もSELECT可能にする（ロックなしで更新）
--- ただし一意なインデックスが必要
-CREATE UNIQUE INDEX idx_mat_product_id ON product_sales_mat (product_id);
-
-REFRESH MATERIALIZED VIEW CONCURRENTLY product_sales_mat;
--- CONCURRENTLYを使うと更新中もVIEWが参照できる（一意インデックス必須）
-```
-
-### 定期的なREFRESHの設定
-
-```sql
--- PostgreSQLにはスケジュール実行機能がないため、
--- pg_cronやcronジョブで定期実行するのが一般的
-
--- pg_cronの例（毎時0分にREFRESH）
--- SELECT cron.schedule('0 * * * *', $$REFRESH MATERIALIZED VIEW CONCURRENTLY product_sales_mat$$);
-
--- または外部のcronジョブから
--- psql -d mydb -c "REFRESH MATERIALIZED VIEW CONCURRENTLY product_sales_mat"
-```
-
-> **ポイント**  
-> `CONCURRENTLY` オプションを使うとREFRESH中もSELECTできます（ロックなし）。ただし一意インデックスが必要で、初回のCONCURRENT REFRESHはできません（通常のREFRESH後にCONCURRENTLYが使えます）。
-
----
-
-## 10. VIEWを使いすぎる危険（ネストが深くなるとパフォーマンス問題）
-
-### ネストしたVIEWの問題
-
-```sql
--- VIEWがVIEWを参照するとネストが深くなる
-CREATE VIEW view_a AS
-SELECT * FROM products WHERE category = '果物';
-
-CREATE VIEW view_b AS
-SELECT * FROM view_a WHERE price > 100;  -- view_aを参照
-
-CREATE VIEW view_c AS
-SELECT * FROM view_b WHERE stock > 50;  -- view_bを参照（view_a → products）
-
--- view_cへのクエリは実際には3段階展開される
-SELECT * FROM view_c;
--- → SELECT * FROM (SELECT * FROM (SELECT * FROM products WHERE ...) WHERE ...) WHERE ...
-```
-
-### パフォーマンス問題の例
-
-```sql
--- 問題のあるパターン: 複雑なVIEWをさらにJOINする
--- products_summary_view（複雑な集計含む）
--- ↓
--- top_products_view（products_summary_viewを参照）
--- ↓
--- final_report_view（top_products_viewとその他のビューをJOIN）
-
--- このような多段VIEWは、最終的に何十本もJOINされた巨大クエリになる
-
--- 対策: VIEWの代わりにマテリアライズドビューを使う
--- 対策: VIEWのネストは3段以内に抑える
--- 対策: 複雑な中間処理はCTEやアプリケーション層で処理する
-
--- EXPLAINで展開後のクエリを確認する
-EXPLAIN SELECT * FROM product_sales_summary;
-```
-
-> **注意**  
-> VIEWはクエリを隠蔽してくれますが、その内部では毎回元のSELECTが実行されます。複数のVIEWが積み重なると、実行時に何十テーブルもJOINされた巨大クエリが走ることになり、パフォーマンスが著しく低下します。「VIEWが3つ以上ネストしたら要注意」と覚えておきましょう。
+> テーブルが大きい場合、CROSS JOINの結果行数は「行数A × 行数B」になります。1万行 × 1万行 = 1億行になるため、意図せず実行すると大変なことになります。使う際は必ず件数を確認してから実行しましょう。
 
 > **現場メモ**  
-> VIEWは便利ですが「VIEWに変更を加えたら依存するVIEWが壊れた」という問題が起きることがあります。VIEW Aを変更したらVIEW AをJOINしているVIEW Bがエラーになり、さらにVIEW BをSELECTしているアプリコードが動かなくなる、という連鎖崩壊です。筆者が関わったプロジェクトでは多段VIEWが10本以上あり、どのVIEWがどのVIEWに依存しているかの把握が困難になっていました。`pg_depend` や `information_schema.view_column_usage` でVIEWの依存関係を確認する習慣を持ちましょう。また、マテリアライズドビューのREFRESHタイミングもよく問題になります。「最新データが出ない」という報告が来て調べたら、マテリアライズドビューのREFRESHが止まっていた、という事象は珍しくありません。
+> CROSS JOINを意図せず発生させてしまう「古いSQL記法」に注意が必要です。`FROM table_a, table_b WHERE a.id = b.id` という書き方はCROSS JOINと等価で、WHERE句の条件をうっかり外すと全行の組み合わせが返ります。筆者がレガシーコードを保守していたとき、開発者がWHERE句を誤って削除してしまい、数万行 × 数万行のカーテシアン積が発生してDBに高負荷がかかった経験があります。現在は `INNER JOIN ... ON ...` と明示的に書くスタイルが標準です。古い記法を見かけたら、レビューで現代的な書き方へのリライトを提案することをお勧めします。
 
 ---
 
-## 11. よくあるミス
+## 4. CROSS JOINの使い所（カレンダー生成等）
 
-### ミス1: VIEWのデータが古いと思って困惑する
+### カレンダーの生成
+
+CROSS JOINは「すべての組み合わせが欲しい」場面で重宝します。代表的なのがカレンダーの生成です。
 
 ```sql
--- 通常VIEWは常に最新（毎回クエリが実行される）
--- マテリアライズドビューはREFRESHしないと古い
-
--- 確認: 今参照しているのは通常VIEWか？マテリアライズドか？
-SELECT schemaname, matviewname  -- マテリアライズドビューの一覧
-FROM pg_matviews
-WHERE schemaname = 'public';
-
-SELECT schemaname, viewname  -- 通常VIEWの一覧
-FROM pg_views
-WHERE schemaname = 'public';
+-- 月のテーブルを生成してCROSS JOINでカレンダーを作る
+WITH months AS (
+    SELECT generate_series(1, 12) AS month
+),
+days AS (
+    SELECT generate_series(1, 31) AS day
+)
+SELECT month, day
+FROM months
+CROSS JOIN days
+ORDER BY month, day
+LIMIT 30; -- 確認用に30行だけ表示
 ```
 
-### ミス2: 更新不可なVIEWに対してUPDATEしてエラー
+### 商品と倉庫の在庫マスタ生成
 
 ```sql
--- JOINを含むVIEWには直接UPDATEできない
--- CREATE VIEW product_order_view AS
--- SELECT p.product_name, od.quantity
--- FROM products p JOIN order_details od ON p.product_id = od.product_id;
+-- 全商品 × 全倉庫の組み合わせで在庫マスタの雛形を作る
+CREATE TABLE products (product_id INT, product_name TEXT);
+CREATE TABLE warehouses (warehouse_id INT, location TEXT);
 
--- UPDATE product_order_view SET quantity = 10;  -- エラー！
+INSERT INTO products VALUES (1, 'りんご'), (2, 'みかん'), (3, 'ぶどう');
+INSERT INTO warehouses VALUES (101, '東京倉庫'), (102, '大阪倉庫');
 
--- 解決策: 元テーブルを直接UPDATEする
-UPDATE order_details SET quantity = 10 WHERE detail_id = 1;
+SELECT
+    p.product_id,
+    p.product_name,
+    w.warehouse_id,
+    w.location,
+    0 AS stock_count  -- 初期在庫は0
+FROM products p
+CROSS JOIN warehouses w
+ORDER BY p.product_id, w.warehouse_id;
 ```
 
-### ミス3: DROP VIEW で依存先が消える
+> **ポイント**  
+> CROSS JOINは「マスタデータとマスタデータを掛け合わせて初期データを作る」用途でよく使われます。ゲームのキャラクター × 装備の組み合わせ一覧、時間帯 × 曜日のシフト雛形なども同様です。
+
+---
+
+## 5. 3テーブル以上のJOIN（順序と可読性）
+
+### 複数テーブルのJOIN
+
+実務では3つ以上のテーブルを結合することが頻繁にあります。JOINは左から順番に処理されていくイメージです。
 
 ```sql
--- 誤ってCASCADEを付けると依存するVIEWも全削除
--- DROP VIEW base_view CASCADE;  -- base_viewを参照するVIEWも全部消える！
+-- テーブル準備
+CREATE TABLE orders (
+    order_id    INT PRIMARY KEY,
+    customer_id INT,
+    product_id  INT,
+    quantity    INT
+);
 
--- 安全な確認方法: まず依存関係を調べる
-SELECT DISTINCT
-    dependent_view.relname AS dependent_view
-FROM pg_depend
-INNER JOIN pg_rewrite ON pg_depend.objid = pg_rewrite.oid
-INNER JOIN pg_class AS dependent_view ON pg_rewrite.ev_class = dependent_view.oid
-INNER JOIN pg_class AS source_table ON pg_depend.refobjid = source_table.oid
-WHERE source_table.relname = 'fruits_view'
-  AND source_table.relkind = 'v';
+CREATE TABLE customers (
+    customer_id INT PRIMARY KEY,
+    customer_name TEXT
+);
+
+CREATE TABLE products_master (
+    product_id   INT PRIMARY KEY,
+    product_name TEXT,
+    price        INT
+);
+
+INSERT INTO customers VALUES (1, '山田商店'), (2, '鈴木ショップ');
+INSERT INTO products_master VALUES (10, 'りんご', 150), (20, 'みかん', 100);
+INSERT INTO orders VALUES (1, 1, 10, 5), (2, 1, 20, 3), (3, 2, 10, 2);
+
+-- 3テーブルを結合して注文一覧を取得
+SELECT
+    o.order_id,
+    c.customer_name,
+    p.product_name,
+    o.quantity,
+    p.price * o.quantity AS total_price
+FROM orders o
+INNER JOIN customers c         ON o.customer_id = c.customer_id
+INNER JOIN products_master p   ON o.product_id  = p.product_id
+ORDER BY o.order_id;
 ```
 
-### ミス4: SELECT * をVIEWに使う
+### 可読性のためのコツ
 
 ```sql
--- 悪い例: SELECT * のVIEW
--- CREATE VIEW all_products AS SELECT * FROM products;
--- products テーブルに列を追加しても、CREATE OR REPLACEしないと新しい列が出ない場合がある
+-- 長くなる場合はCTEを使うと読みやすい（詳細はlesson11参照）
+WITH order_details AS (
+    SELECT
+        o.order_id,
+        o.customer_id,
+        o.product_id,
+        o.quantity
+    FROM orders o
+)
+SELECT
+    od.order_id,
+    c.customer_name,
+    p.product_name,
+    od.quantity,
+    p.price * od.quantity AS total_price
+FROM order_details od
+INNER JOIN customers c         ON od.customer_id = c.customer_id
+INNER JOIN products_master p   ON od.product_id  = p.product_id;
+```
 
--- 良い例: 明示的に列を指定
-CREATE OR REPLACE VIEW all_products AS
-SELECT product_id, product_name, category, price, stock
-FROM products;
+> **ポイント**  
+> JOINを重ねるときは「どのテーブルが中心か」を意識してください。中心テーブル（ここではorders）をFROMに置き、そこから関連テーブルをJOINしていくと論理的に読みやすくなります。
+
+> **現場メモ**  
+> 実務では4〜5テーブルを結合するクエリも珍しくありませんが、JOINが3つを超えたあたりからコードの見通しが急激に悪くなります。そのタイミングで「CTEに分割できないか」を検討することをお勧めします。筆者が経験したケースでは、5テーブルJOINのクエリが「なぜこの結果になるのか誰もわからない」状態になっていて、CTEに分割したところバグが2つ見つかったことがありました。またPostgreSQLのプランナーはJOINの順序を最適化しますが、複雑すぎると最適化に失敗して遅いプランを選ぶことがあります。EXPLAINで確認しながら、必要に応じてCTEを使って中間結果を明示的に作るとパフォーマンスが改善することがあります。
+
+---
+
+## 6. 自己結合（同じテーブルを2回JOINする）
+
+### 自己結合とは
+
+**自己結合**とは、同じテーブルを「2つの別テーブルのように見なして」結合する手法です。必ずエイリアス（別名）を付けることで区別します。
+
+```sql
+-- 社員テーブル（manager_idは上司の社員IDを指す）
+CREATE TABLE staff (
+    id         INT PRIMARY KEY,
+    name       TEXT,
+    manager_id INT  -- NULLの場合は最上位
+);
+
+INSERT INTO staff VALUES
+    (1, '社長',   NULL),
+    (2, '部長A',  1),
+    (3, '部長B',  1),
+    (4, '課長C',  2),
+    (5, '課長D',  2),
+    (6, '一般E',  4);
+
+-- 社員とその上司名を取得する自己結合
+SELECT
+    e.id        AS emp_id,
+    e.name      AS emp_name,
+    m.name      AS manager_name
+FROM staff e
+LEFT JOIN staff m ON e.manager_id = m.id
+ORDER BY e.id;
+```
+
+**結果**
+
+| emp_id | emp_name | manager_name |
+|--------|----------|--------------|
+| 1      | 社長     | NULL         |
+| 2      | 部長A    | 社長         |
+| 3      | 部長B    | 社長         |
+| 4      | 課長C    | 部長A        |
+| 5      | 課長D    | 部長A        |
+| 6      | 一般E    | 課長C        |
+
+> **ポイント**  
+> 自己結合では必ず別々のエイリアス（e, mなど）を付けてください。同じテーブルを「社員として」と「上司として」の2役で使うイメージです。
+
+---
+
+## 7. 自己結合の使い所（親子関係、上司・部下）
+
+### カテゴリの親子関係
+
+```sql
+-- カテゴリテーブル（parent_idで親カテゴリを参照）
+CREATE TABLE categories (
+    id        INT PRIMARY KEY,
+    name      TEXT,
+    parent_id INT
+);
+
+INSERT INTO categories VALUES
+    (1, '食品',     NULL),
+    (2, '野菜',     1),
+    (3, '果物',     1),
+    (4, 'にんじん', 2),
+    (5, 'りんご',   3);
+
+-- 各カテゴリとその親カテゴリ名を取得
+SELECT
+    c.name       AS category,
+    p.name       AS parent_category
+FROM categories c
+LEFT JOIN categories p ON c.parent_id = p.id
+ORDER BY c.id;
+```
+
+### 同じ部署の社員を横に並べる
+
+```sql
+-- 同じ部署に所属する社員のペアを取得（重複排除）
+SELECT
+    a.name AS employee_a,
+    b.name AS employee_b
+FROM staff a
+INNER JOIN staff b ON a.manager_id = b.manager_id
+WHERE a.id < b.id  -- 重複ペアを防ぐ（A,BとB,Aが両方出ないように）
+ORDER BY a.name;
+```
+
+> **ポイント**  
+> 自己結合で「同じグループ内の組み合わせ」を作る場合、`a.id < b.id` のような条件で重複ペアを防ぐのが定石です。
+
+---
+
+## 8. アンチジョイン（LEFT JOIN + WHERE IS NULL）
+
+### アンチジョインとは
+
+アンチジョインは「**テーブルAにあってテーブルBにはない**レコードを取得する」手法です。「まだ注文していない顧客」「商品が割り当てられていない社員」などを見つけるのに使います。
+
+```sql
+-- 注文履歴のない顧客を取得するアンチジョイン
+SELECT
+    c.customer_id,
+    c.customer_name
+FROM customers c
+LEFT JOIN orders o ON c.customer_id = o.customer_id
+WHERE o.order_id IS NULL;  -- JOINしてもマッチしなかった行
+```
+
+### NOT INを使った書き方との比較
+
+```sql
+-- NOT IN を使う方法（NULLに注意）
+SELECT customer_id, customer_name
+FROM customers
+WHERE customer_id NOT IN (
+    SELECT customer_id FROM orders
+);
+
+-- NOT EXISTS を使う方法
+SELECT c.customer_id, c.customer_name
+FROM customers c
+WHERE NOT EXISTS (
+    SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id
+);
 ```
 
 > **注意**  
-> VIEWに `SELECT *` を使うと、元テーブルの列が変わったときに予期しない動作をすることがあります。列名を明示的に指定するのが安全です。
+> `NOT IN` はサブクエリ内にNULLが含まれると期待通りに動作しません（結果が0件になることがあります）。安全性の面では **LEFT JOIN + IS NULL** か **NOT EXISTS** を使う方が推奨されます。
+
+> **現場メモ**  
+> `NOT IN` のNULLハマりは、経験豊富なエンジニアでも油断すると踏む落とし穴です。「対象外の顧客を除いて集計」というバッチ処理を書いたとき、`NOT IN` のサブクエリに `NULL` が1件混入しただけで結果が「0件」になるバグが本番データで発生し、「集計結果がおかしい」という報告が来てから気づいた経験があります。`NOT IN` のサブクエリは `WHERE xxx IS NOT NULL` を付けて NULL を明示的に除外するか、最初から `NOT EXISTS` か `LEFT JOIN + IS NULL` を使う習慣をつけることを強くお勧めします。面接でも「NOT INのNULLについて説明してください」という質問が出ることがあります。
 
 ---
 
-## 12. PRレビューのチェックポイント
+## 9. JOINの実行順序のイメージ
 
-- [ ] **VIEW のネストが 3 段以上になっていないか**
-  - 多段 VIEW はパフォーマンス劣化の原因。EXPLAIN で展開後のクエリを確認する
-- [ ] **VIEW 内で `SELECT *` を使っていないか**
-  - テーブルにカラムを追加したとき VIEW が古い定義のままになる
-- [ ] **更新可能な VIEW（Updatable View）に意図しない INSERT / UPDATE をしていないか**
-  - VIEW への書き込みが意図通りに元テーブルに反映されるか確認する
-- [ ] **マテリアライズドビューの REFRESH タイミングが要件と合っているか**
-  - 「リアルタイムに最新データが必要か」「1時間遅延でも許容できるか」を確認
-- [ ] **DROP VIEW CASCADE を使う前に依存先の VIEW / クエリを確認しているか**
-  - CASCADE は依存する VIEW も連鎖削除する
+### SQLの論理的な処理順序
+
+SQLは書いた順に実行されるのではなく、内部的に決まった順序で処理されます：
+
+```
+1. FROM（どのテーブルを使うか）
+2. JOIN（テーブルを結合）
+3. WHERE（行を絞り込む）
+4. GROUP BY（グループ化）
+5. HAVING（グループを絞り込む）
+6. SELECT（列を選択）
+7. ORDER BY（並び替え）
+8. LIMIT（件数を制限）
+```
+
+```sql
+-- 実行順序を意識して読むと理解しやすい例
+SELECT
+    c.customer_name,           -- 6. この列を選ぶ
+    SUM(p.price * o.quantity)  -- 6. 合計を計算
+FROM orders o                  -- 1. ordersを起点に
+INNER JOIN customers c ON o.customer_id = c.customer_id  -- 2. 顧客と結合
+INNER JOIN products_master p ON o.product_id = p.product_id  -- 2. 商品と結合
+WHERE o.quantity > 2           -- 3. 数量2以上に絞る
+GROUP BY c.customer_name       -- 4. 顧客名でグループ化
+HAVING SUM(p.price * o.quantity) > 500  -- 5. 合計500以上に絞る
+ORDER BY SUM(p.price * o.quantity) DESC  -- 7. 降順で並べる
+LIMIT 10;                      -- 8. 10件に絞る
+```
+
+> **ポイント**  
+> JOIN後に WHERE で絞り込まれます。そのため「JOINしてから条件を絞る」と「ON句に条件を書く」では、LEFT JOINの場合に結果が変わることがあります。意図を明確にするためにも、結合条件はON句、フィルタ条件はWHERE句に分けて書くのが基本です。
 
 ---
 
-## 13. まとめ
+## 10. よくあるミスと対処法
+
+### ミス1: カーテシアン積の発生（意図しないCROSS JOIN）
+
+```sql
+-- ON句を書き忘れると全行 × 全行になってしまう
+-- 悪い例
+SELECT * FROM orders, customers;  -- これは古い記法でCROSS JOINと同じ！
+
+-- 正しい例
+SELECT * FROM orders o
+INNER JOIN customers c ON o.customer_id = c.customer_id;
+```
+
+### ミス2: LEFT JOINのWHERE条件で意図せずINNER JOINになる
+
+```sql
+-- 悪い例: WHERE句に右テーブルの条件を書くとINNER JOINと同じになる
+SELECT c.customer_name, o.order_id
+FROM customers c
+LEFT JOIN orders o ON c.customer_id = o.customer_id
+WHERE o.quantity > 2;  -- NULLの行は除外されてしまう！
+
+-- 良い例: 右テーブルの条件はON句に書く（または意図してINNER JOINに変える）
+SELECT c.customer_name, o.order_id
+FROM customers c
+LEFT JOIN orders o ON c.customer_id = o.customer_id
+                   AND o.quantity > 2;  -- ON句に書くとNULL行が残る
+```
+
+> **現場メモ**  
+> 「注文履歴のない顧客も含めてレポートを作りたい」と依頼されてLEFT JOINで書いたのに、WHERE句に右テーブルの条件を書いてしまって「注文した顧客しか出ない」バグは頻出です。筆者がPRレビューで最もよく指摘するのがこのパターンです。コードを書いたエンジニア自身も「LEFT JOINを使ったから大丈夫」と思い込んでいることが多く、テストデータに「注文履歴なし顧客」を入れていないと発見が遅れます。LEFT JOINを使う際は「右テーブルがNULLになるケースのテストデータ」を必ず用意してください。
+
+### ミス3: 自己結合でエイリアスをつけ忘れる
+
+```sql
+-- 悪い例: エイリアスなしだとどちらのテーブルか不明
+-- SELECT id, name FROM staff JOIN staff ON manager_id = id;  -- エラー
+
+-- 正しい例
+SELECT e.id, e.name, m.name AS manager_name
+FROM staff e
+LEFT JOIN staff m ON e.manager_id = m.id;
+```
+
+### ミス4: FULL OUTER JOINとUNIONの混同
+
+```sql
+-- FULL OUTER JOINはUNIONとは別物
+-- UNION: 行を縦に結合する（同じ列構造が必要）
+-- FULL OUTER JOIN: テーブルを横に結合する（列が増える）
+
+-- 正しく使い分けること
+SELECT id, name FROM employees
+UNION
+SELECT id, name FROM contractors;  -- 縦に結合
+
+-- 横に結合するならFULL OUTER JOIN
+SELECT e.name AS employee, c.name AS contractor
+FROM employees e
+FULL OUTER JOIN contractors c ON e.id = c.id;
+```
+
+> **注意**  
+> JOINの種類（INNER/LEFT/RIGHT/FULL/CROSS）を間違えると、取得できる行数が大きく変わります。実行前に「何行返ってくるはずか」を頭の中でイメージする習慣をつけましょう。
+
+---
+
+## 11. ポイント
+
+JOINを使ったSQLのコードレビューで確認するポイントをまとめます。
+
+### INNER JOIN vs LEFT JOIN の選択
+
+- **「右テーブルにデータが必ずある保証があるか」を確認する**
+  - 保証がなければ LEFT JOIN を使うべき。INNER JOIN だとデータが欠ける
+- **LEFT JOIN を使ったのに WHERE 句で右テーブルの条件を書いていないか**
+  - `WHERE right_table.col = x` を書くと INNER JOIN と同じ効果になる
+  - 右テーブルへのフィルタ条件は `ON` 句に書く
+
+### パフォーマンスと可読性
+
+- **JOIN が 3 つ以上になっていたら CTE への分割を検討する**
+  - 複雑な JOIN は読みにくく、プランナーの最適化に失敗することがある
+- **CROSS JOIN が意図的かどうか確認する**
+  - `FROM a, b` という古い記法で ON 条件がない場合、意図しない CROSS JOIN になっていることがある
+- **自己結合のエイリアスが意味のある名前になっているか**
+  - `e`（employee）, `m`（manager）など、役割がわかるエイリアスをつける
+
+### アンチジョイン
+
+- **`NOT IN` のサブクエリに NULL が混入する可能性がないか**
+  - NULL が含まれると結果が 0 件になるバグが起きる
+  - `NOT EXISTS` か `LEFT JOIN + WHERE IS NULL` を推奨
+- **アンチジョインを使う場面で、単に「一致しない行を取りたい」だけか**
+  - `NOT IN` に大量データのサブクエリを渡すとパフォーマンスが悪くなる場合がある
+
+---
+
+## 12. まとめ
 
 | テーマ | 要点 |
 | --- | --- |
-| VIEWとは | SELECTに名前をつけて保存した仮想テーブル。データは持たない |
-| CREATE VIEW | `CREATE VIEW 名前 AS SELECT ...` |
-| CREATE OR REPLACE | 既存VIEWを更新（列の削除・型変更は不可） |
-| VIEWのメリット | 複雑クエリの再利用・セキュリティ（列/行の隠蔽）|
-| 更新可能VIEW | JOIN/GROUP BY/集計なしのシンプルなVIEWのみ更新可能 |
-| DROP VIEW | `CASCADE` は依存先も削除するため慎重に使う |
-| マテリアライズドビュー | 結果をディスクに保存。高速だが手動REFRESHが必要 |
-| REFRESH | `REFRESH MATERIALIZED VIEW [CONCURRENTLY]` で更新 |
-| 使いすぎの危険 | VIEWのネストが深いと実行時に巨大クエリになりパフォーマンス低下 |
-| よくあるミス | SELECT *使用・更新不可VIEWへのUPDATE・CASCADE削除 |
+| FULL OUTER JOIN | 両テーブルの全行を返す。マッチしない側はNULLになる |
+| FULL OUTER JOINの用途 | 2テーブル間の差分確認・突き合わせ |
+| CROSS JOIN | 全行の組み合わせ（直積）を返す。件数に注意 |
+| CROSS JOINの用途 | カレンダー生成・マスタの組み合わせ雛形作成 |
+| 複数テーブルのJOIN | 中心テーブルをFROMに置き、左から順にJOINを重ねる |
+| 自己結合 | 同じテーブルを2回使う。必ずエイリアスをつける |
+| 自己結合の用途 | 親子関係・上司部下・同グループのペア生成 |
+| アンチジョイン | LEFT JOIN + WHERE IS NULL で「片方にしかない行」を取得 |
+| 実行順序 | FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT |
+| よくあるミス | ON句忘れ・LEFT JOINのWHERE条件・エイリアス忘れ |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS sales (
+  id         INTEGER PRIMARY KEY,
+  staff_name TEXT    NOT NULL,
+  amount     INTEGER NOT NULL,
+  sale_date  DATE    NOT NULL
+);
+DELETE FROM sales;
+INSERT INTO sales (id, staff_name, amount, sale_date) VALUES
+  (1, '田中',  85000, '2024-01-10'),
+  (2, '鈴木', 120000, '2024-01-15'),
+  (3, '田中',  60000, '2024-02-01'),
+  (4, '佐藤',  95000, '2024-02-10'),
+  (5, '鈴木',  40000, '2024-02-20');
+
+CREATE TABLE IF NOT EXISTS products (
+  id   INTEGER PRIMARY KEY,
+  name TEXT    NOT NULL
+);
+DELETE FROM products;
+INSERT INTO products (id, name) VALUES
+  (1, 'りんご'), (2, 'みかん'), (3, 'にんじん'), (4, 'バナナ');
+
+CREATE TABLE IF NOT EXISTS order_items (
+  order_id   INTEGER NOT NULL,
+  product_id INTEGER NOT NULL,
+  quantity   INTEGER NOT NULL,
+  PRIMARY KEY (order_id, product_id)
+);
+DELETE FROM order_items;
+INSERT INTO order_items (order_id, product_id, quantity) VALUES
+  (1, 1, 3), (1, 3, 2),
+  (2, 2, 5), (2, 4, 1),
+  (3, 1, 1);
+```
+
+### 問題1: スカラーサブクエリで平均以上を取得
+
+> 参照：[1. FULL OUTER JOIN](#1-full-outer-join両テーブルの全行を取得)
+
+`sales` テーブルで、`amount` が全体の平均以上の行を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT staff_name, amount
+FROM sales
+WHERE amount >= (SELECT AVG(amount) FROM sales);
+```
+
+**解説：** `(SELECT AVG(amount) FROM sales)` はスカラーサブクエリで、単一の値（全体平均）を返します。外側の WHERE でその値と比較します。平均は 80000 になるので田中85000・鈴木120000・佐藤95000が該当します。
+
+</details>
+
+### 問題2: FROM サブクエリで担当者別集計を絞り込み
+
+> 参照：[8. アンチジョイン](#8-アンチジョインleft-join-where-is-null)
+
+担当者ごとの合計売上を集計し、そのうち合計が 150000 以上の担当者だけを取得してください（FROM 句にサブクエリを使ってください）。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT staff_name, total_amount
+FROM (
+  SELECT staff_name, SUM(amount) AS total_amount
+  FROM sales
+  GROUP BY staff_name
+) AS staff_totals
+WHERE total_amount >= 150000;
+```
+
+**解説：** FROM 句のサブクエリ（インラインビュー）は一時的な仮想テーブルとして扱われます。エイリアス（`staff_totals`）が必須です。内側で GROUP BY して集計し、外側で HAVING の代わりに WHERE で絞ります。鈴木（160000）のみが該当します。
+
+</details>
+
+### 問題3: EXISTS で条件一致の確認
+
+> 参照：[1. FULL OUTER JOIN](#1-full-outer-join両テーブルの全行を取得)
+
+`order_items` に1件以上購入実績のある `products` の `name` を EXISTS を使って取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT name
+FROM products AS p
+WHERE EXISTS (
+  SELECT 1
+  FROM order_items AS oi
+  WHERE oi.product_id = p.id
+);
+```
+
+**解説：** `EXISTS (サブクエリ)` はサブクエリが1行でも返せば真です。`SELECT 1` は実際の値ではなく「行が存在するか」だけを確認するため定番の書き方です。相関サブクエリで外側の `p.id` を参照しているのがポイントです。`IN` でも書けますが、EXISTS は行が見つかった時点で走査を止めるため効率的です。
+
+</details>

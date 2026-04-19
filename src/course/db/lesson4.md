@@ -385,15 +385,15 @@ CREATE TABLE users (
 > **注意**  
 > `VARCHAR(n)` の `n` を後から大きくする `ALTER TABLE` は基本的に問題ありませんが、小さくする場合はデータが切り捨てられるリスクがあります。最初に適切な長さを設定しておきましょう。
 
-## PRレビューのチェックポイント
+## ポイント
 
-- [ ] **金額・価格に REAL / FLOAT を使っていないか**
+- **金額・価格に REAL / FLOAT を使っていないか**
   - 浮動小数点は丸め誤差が出る → NUMERIC（DECIMAL）を使う
-- [ ] **タイムゾーンの扱いが統一されているか**
+- **タイムゾーンの扱いが統一されているか**
   - TIMESTAMP と TIMESTAMPTZ の混在は混乱の原因 → サーバー側はすべて TIMESTAMPTZ 推奨
-- [ ] **PK に SERIAL（INTEGER）を使っているテーブルで将来的なデータ量に問題ないか**
+- **PK に SERIAL（INTEGER）を使っているテーブルで将来的なデータ量に問題ないか**
   - 安全のため BIGSERIAL か GENERATED ALWAYS AS IDENTITY を推奨
-- [ ] **VARCHAR の長さ制限が適切か**
+- **VARCHAR の長さ制限が適切か**
   - 「VARCHAR(255) にとりあえず」ではなく、最大長を意識する
   - PostgreSQL では TEXT と VARCHAR の性能差はほぼないため TEXT でも可
 
@@ -411,3 +411,90 @@ CREATE TABLE users (
 | UUID | 分散環境や予測不可能なID生成に使用。インデックスが大きくなる点に注意 |
 | JSONB | 柔軟なスキーマに使えるが乱用に注意 |
 | PK設計 | 迷ったら `BIGSERIAL`。UUID は特定の要件がある場合に |
+
+---
+
+## 練習問題
+
+### 問題1: 適切な数値型の選択
+
+> 参照：[1. 整数型](#1-整数型smallint-integer-bigint) ・ [2. 小数型](#2-小数型numericdecimal-real-double-precision)
+
+以下のカラムに最適な型を選び、理由を答えてください。
+
+| カラム | 候補 |
+|--------|------|
+| 商品の価格（円） | INTEGER / NUMERIC(10,2) / REAL |
+| 評価スコア（0.0〜5.0、小数1桁） | REAL / NUMERIC(3,1) / INTEGER |
+| 在庫数（0〜100万） | SMALLINT / INTEGER / BIGINT |
+
+<details>
+<summary>回答を見る</summary>
+
+| カラム | 推奨型 | 理由 |
+|--------|--------|------|
+| 商品の価格（円） | `INTEGER` | 円は整数なので整数型で十分。REAL/DOUBLE は浮動小数点誤差があるため金額に不適 |
+| 評価スコア | `NUMERIC(3,1)` | 小数を正確に扱う必要があるため NUMERIC。REAL は 4.9 が 4.900000095... になる可能性がある |
+| 在庫数 | `INTEGER` | 0〜100万は INTEGER（約±21億）の範囲内。SMALLINT（±32767）では不足する可能性 |
+
+**解説：** 金額・スコアなど精度が重要な数値には `NUMERIC`（または `DECIMAL`）を使います。`REAL` や `DOUBLE PRECISION` は科学計算向けで、わずかな誤差が生じます。整数は範囲を見てSMALLINT/INTEGER/BIGINTを選びます。
+
+</details>
+
+### 問題2: 日時型の選択
+
+> 参照：[4. 日付・時刻型](#4-日付・時刻型date-time-timestamp-timestamptz)
+
+以下のカラムに最適な型を選び、理由を答えてください。
+
+| カラム | 候補 |
+|--------|------|
+| 記事の公開日 | DATE / TIMESTAMP / TIMESTAMPTZ |
+| ユーザーの登録日時 | DATE / TIMESTAMP / TIMESTAMPTZ |
+| 営業時間の開始時刻 | TIME / TIMETZ / TEXT |
+
+<details>
+<summary>回答を見る</summary>
+
+| カラム | 推奨型 | 理由 |
+|--------|--------|------|
+| 記事の公開日 | `DATE` | 日付だけ管理すれば十分。時刻情報は不要 |
+| ユーザーの登録日時 | `TIMESTAMPTZ` | タイムゾーン込みで記録することで、サーバーがどの地域にあっても正確な時刻が保持される |
+| 営業時間の開始時刻 | `TIME` | 時刻だけを保持する専用型。タイムゾーンは通常不要 |
+
+**解説：** 日時型は `TIMESTAMPTZ`（タイムゾーン付きタイムスタンプ）が現代の標準です。タイムゾーンなしの `TIMESTAMP` は後からタイムゾーンが変わったときに混乱します。「日付だけ」なら `DATE`、「時刻だけ」なら `TIME` を使います。
+
+</details>
+
+### 問題3: PKの設計
+
+> 参照：[7. PK設計](#7-pk設計serial-vs-bigserial-vs-uuid)
+
+新しいECサイトの注文テーブル (`orders`) を設計します。以下の要件でどの主キー設計を選びますか？
+
+- 将来的にマイクロサービス分割の可能性がある
+- 注文IDを外部システム（物流・決済）に共有する必要がある
+- 1日あたり最大10万件の注文
+
+<details>
+<summary>回答を見る</summary>
+
+**推奨：UUID**
+
+```sql
+CREATE TABLE orders (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  customer_id BIGINT NOT NULL,
+  amount      INTEGER NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+**解説：** 上記の要件では UUID が適切です。
+- **マイクロサービス**：複数のサービスがそれぞれDBを持つ場合、SERIAL は重複する可能性がある。UUIDは分散環境でも衝突しない
+- **外部システム共有**：連番（1,2,3...）は推測可能で悪意ある利用（「注文が全部で何件あるか」推測）のリスクがある
+- **件数**：1日10万件は BIGSERIAL でも対応できるが、将来拡張も考慮
+
+1日10万件程度でマイクロサービス化の予定がなければ `BIGSERIAL` でも十分です。
+
+</details>

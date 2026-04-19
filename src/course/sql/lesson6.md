@@ -1,448 +1,557 @@
-# 集計関数
-COUNT・SUM・AVG・MAX・MINの使い方とNULLの扱いを学びます
+# INSERT と UPSERT
+データを挿入するINSERTと、競合時に更新するUPSERT（INSERT ON CONFLICT）を学びます
 
 ## 本章の目標
 
 本章では以下を目標にして学習します。
 
-- COUNT・SUM・AVG・MAX・MIN の各集計関数を正しく使えること
-- NULL が集計に与える影響を理解し、意図した通りの集計ができること
-- COUNT(*) と COUNT(列名) の違いを説明できること
-- FILTER 句を使って条件付き集計ができること
-- 集計関数が WHERE 句では使えない理由を理解していること
+- INSERT の基本構文で1行・複数行のデータを挿入できること
+- 列を省略した場合の挙動（DEFAULT・NULL）を理解できること
+- INSERT INTO ... SELECT ... で別テーブルからデータをコピーできること
+- RETURNING 句で挿入した行の値を受け取れること
+- UPSERT（INSERT ON CONFLICT）で「あれば更新、なければ挿入」を実装できること
+- EXCLUDED を使って競合した行の値を参照できること
 
 ---
 
-## 1. 集計関数とは
+## 1. INSERT の基本構文
 
-集計関数（Aggregate Function）は、複数の行を1つの値にまとめる関数です。  
-「全商品の合計金額」「平均年齢」「最大値・最小値」などを計算するために使います。
+INSERT 文はテーブルに新しい行を追加します。
 
-以下の `orders` テーブルを例に使います。
-
-| id | customer_id | product | amount | status | order_date |
-|----|-------------|---------|--------|--------|------------|
-| 1 | 101 | りんご | 1500 | 完了 | 2024-01-05 |
-| 2 | 102 | バナナ | 800 | 完了 | 2024-01-10 |
-| 3 | 101 | みかん | NULL | キャンセル | 2024-01-15 |
-| 4 | 103 | ぶどう | 3000 | 完了 | 2024-02-03 |
-| 5 | 102 | いちご | 2500 | 完了 | 2024-02-08 |
-| 6 | 104 | メロン | 5000 | 完了 | 2024-02-12 |
-| 7 | 101 | スイカ | 4000 | 完了 | 2024-03-01 |
-
-### 集計関数を使わないクエリ（行ごとにデータを返す）
+### 基本構文
 
 ```sql
-SELECT id, customer_id, amount FROM orders;
--- 7行返ってくる
+INSERT INTO テーブル名 (列1, 列2, 列3)
+VALUES (値1, 値2, 値3);
 ```
 
-### 集計関数を使ったクエリ（全行を1行に集約する）
+### 例：商品テーブルへの挿入
+
+まず本章で使うサンプルテーブルを用意します。
 
 ```sql
-SELECT SUM(amount) AS total_amount FROM orders;
--- 1行だけ返ってくる
+-- 商品テーブル
+CREATE TABLE products (
+    id          SERIAL PRIMARY KEY,
+    code        TEXT UNIQUE NOT NULL,
+    name        TEXT NOT NULL,
+    price       INTEGER NOT NULL DEFAULT 0,
+    stock       INTEGER NOT NULL DEFAULT 0,
+    category    TEXT,
+    created_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+-- 在庫ログテーブル
+CREATE TABLE stock_logs (
+    id          SERIAL PRIMARY KEY,
+    product_id  INTEGER NOT NULL REFERENCES products(id),
+    change      INTEGER NOT NULL,
+    reason      TEXT,
+    logged_at   TIMESTAMP NOT NULL DEFAULT NOW()
+);
+```
+
+```sql
+-- 列を明示して1行挿入
+INSERT INTO products (code, name, price, stock, category)
+VALUES ('APPLE-001', 'りんご', 150, 100, '果物');
 ```
 
 > **ポイント**  
-> 集計関数は複数の行を1行に「圧縮」します。  
-> GROUP BY を使わない場合は、テーブル全体が1つのグループとして扱われます。
+> 列名を明示して INSERT するのがベストプラクティスです。  
+> テーブルに後から列が追加されても INSERT 文が壊れにくくなります。
 
 ---
 
-## 2. COUNT(*) vs COUNT(列名)
+## 2. 列を省略した場合の挙動
 
-### COUNT(*) — すべての行数をカウント
-
-```sql
--- NULL を含む全行をカウント
-SELECT COUNT(*) AS total_rows FROM orders;
--- 結果: 7
-```
-
-`COUNT(*)` はテーブルの全行数を返します。NULL の有無に関係なくカウントします。
-
-### COUNT(列名) — 指定した列が NULL でない行数をカウント
+INSERT 時に列名を省略すると、定義された列の順番通りに値が割り当てられます。
 
 ```sql
--- amountがNULLでない行数をカウント
-SELECT COUNT(amount) AS non_null_amount FROM orders;
--- 結果: 6（id=3 の amount が NULL なのでカウントされない）
+-- 列名を省略した書き方（テーブルの全列に対して順番に値を指定）
+INSERT INTO products
+VALUES (DEFAULT, 'BANANA-001', 'バナナ', 120, 50, '果物', DEFAULT, DEFAULT);
 ```
 
-`COUNT(列名)` は NULL を除いてカウントします。
-
-### 比較の例
+| 状況 | 挿入される値 |
+|------|-------------|
+| DEFAULT が指定されている列を省略 | DEFAULT 値が使われる |
+| DEFAULT のない列を省略 | NULL が入る（NOT NULL 制約があればエラー） |
+| SERIAL / GENERATED 列を省略 | 自動採番される |
 
 ```sql
-SELECT
-    COUNT(*)      AS 全行数,              -- 7
-    COUNT(amount) AS amount非NULL件数     -- 6
-FROM orders;
+-- category を省略（NULL が入る）
+INSERT INTO products (code, name, price)
+VALUES ('GRAPE-001', 'ぶどう', 300);
+-- category は NULL、stock は DEFAULT の 0、created_at/updated_at は DEFAULT の NOW()
 ```
-
-| 全行数 | amount非NULL件数 |
-|--------|----------------|
-| 7 | 6 |
 
 > **注意**  
-> テーブルの全件数を取得したい場合は `COUNT(*)` を使いましょう。  
-> `COUNT(id)` でも同じ結果になることが多いですが、  
-> 意図が明確な `COUNT(*)` の方が好まれます。
+> NOT NULL 制約があり DEFAULT も指定されていない列を省略するとエラーになります。  
+> `ERROR: null value in column "name" of relation "products" violates not-null constraint`  
+> 必ず必須列は明示的に指定しましょう。
 
 ---
 
-## 3. SUM / AVG / MAX / MIN の基本
+## 3. 複数行の INSERT
 
-### SUM — 合計
+VALUES に複数組の値を書くことで、1つの INSERT 文で複数行を挿入できます。
 
 ```sql
--- 全注文の合計金額
-SELECT SUM(amount) AS total_amount FROM orders;
--- 結果: 16800 (NULL は無視される)
+-- 複数行を一度に挿入
+INSERT INTO products (code, name, price, stock, category)
+VALUES
+    ('MANGO-001',   'マンゴー',   500, 30, '果物'),
+    ('ORANGE-001',  'オレンジ',   100, 80, '果物'),
+    ('SPINACH-001', 'ほうれん草',  80, 60, '野菜'),
+    ('CARROT-001',  'にんじん',    60, 90, '野菜');
 ```
 
-### AVG — 平均
+### 1行ずつ INSERT するのと複数行 INSERT の違い
+
+| 方法 | ネットワーク往復 | パフォーマンス |
+|------|----------------|--------------|
+| 1行ずつ（ループ）| N 回 | 遅い |
+| 複数行まとめて | 1回 | 速い |
+
+> **ポイント**  
+> アプリケーションから大量データを挿入する場合は、ループで1件ずつ INSERT するより  
+> 複数行まとめた INSERT の方が大幅に速くなります。  
+> ただし VALUES の数が非常に多い場合は分割して送ることを検討してください。
+
+---
+
+## 4. INSERT INTO ... SELECT ...
+
+別テーブルや同じテーブルから SELECT した結果をそのまま挿入できます。
 
 ```sql
--- 全注文の平均金額
-SELECT AVG(amount) AS avg_amount FROM orders;
--- 結果: 2800 (16800 ÷ 6件、NULLの1件は除外)
+-- 別テーブルからコピー
+CREATE TABLE products_backup (LIKE products INCLUDING ALL);
+
+INSERT INTO products_backup
+SELECT * FROM products;
 ```
 
-### MAX — 最大値
-
 ```sql
--- 最も高い注文金額
-SELECT MAX(amount) AS max_amount FROM orders;
--- 結果: 5000
+-- 条件付きでコピー（果物カテゴリだけ別テーブルに移す）
+CREATE TABLE fruits (
+    id       SERIAL PRIMARY KEY,
+    code     TEXT UNIQUE NOT NULL,
+    name     TEXT NOT NULL,
+    price    INTEGER NOT NULL DEFAULT 0,
+    stock    INTEGER NOT NULL DEFAULT 0
+);
 
--- 最新の注文日
-SELECT MAX(order_date) AS latest_order FROM orders;
--- 結果: 2024-03-01
+INSERT INTO fruits (code, name, price, stock)
+SELECT code, name, price, stock
+FROM products
+WHERE category = '果物';
 ```
 
-### MIN — 最小値
-
 ```sql
--- 最も安い注文金額
-SELECT MIN(amount) AS min_amount FROM orders;
--- 結果: 800
+-- 集計結果を別テーブルに保存する（データウェアハウスでよく使うパターン）
+CREATE TABLE daily_summary (
+    summary_date  DATE,
+    category      TEXT,
+    total_stock   INTEGER,
+    total_value   BIGINT
+);
 
--- 最も古い注文日
-SELECT MIN(order_date) AS oldest_order FROM orders;
--- 結果: 2024-01-05
-```
-
-### まとめて使う
-
-```sql
+INSERT INTO daily_summary (summary_date, category, total_stock, total_value)
 SELECT
-    COUNT(*)      AS 注文件数,
-    SUM(amount)   AS 合計金額,
-    AVG(amount)   AS 平均金額,
-    MAX(amount)   AS 最高金額,
-    MIN(amount)   AS 最低金額
-FROM orders;
+    CURRENT_DATE           AS summary_date,
+    category,
+    SUM(stock)             AS total_stock,
+    SUM(stock * price)     AS total_value
+FROM products
+WHERE category IS NOT NULL
+GROUP BY category;
 ```
+
+> **ポイント**  
+> `INSERT INTO ... SELECT ...` は、ETL処理（データ変換・集約）やバックアップ作成に  
+> よく使われるパターンです。SELECT 部分には GROUP BY や JOIN も使えます。
 
 ---
 
-## 4. NULL が集計に与える影響
+## 5. RETURNING 句
 
-集計関数は NULL を無視します。
-
-```sql
--- サンプルデータ: amount は (1500, 800, NULL, 3000, 2500, 5000, 4000)
-
-SELECT COUNT(*)      FROM orders;  -- 7（NULLも含む）
-SELECT COUNT(amount) FROM orders;  -- 6（NULLを除く）
-SELECT SUM(amount)   FROM orders;  -- 16800（NULLを除いた合計）
-SELECT AVG(amount)   FROM orders;  -- 2800（16800 ÷ 6、NULLを除いた平均）
-SELECT MAX(amount)   FROM orders;  -- 5000
-SELECT MIN(amount)   FROM orders;  -- 800
-```
-
-### AVG の NULL 除外に注意
-
-AVG の分母は「NULL でない行数」です。これが意図と合わない場合は修正が必要です。
+INSERT 後に挿入された行の値を取得できます。  
+特に SERIAL や GENERATED カラムの自動採番値を受け取るときに便利です。
 
 ```sql
--- 実際の AVG（NULLを除いた平均）：16800 ÷ 6 = 2800
-SELECT AVG(amount) FROM orders;
-
--- NULL を 0 として計算した平均：16800 ÷ 7 = 2400
-SELECT AVG(COALESCE(amount, 0)) FROM orders;
+-- 挿入した行の id を取得する
+INSERT INTO products (code, name, price, stock, category)
+VALUES ('STRAW-001', 'いちご', 250, 40, '果物')
+RETURNING id;
 ```
 
-どちらが正しいかはビジネス要件によります。  
-「キャンセルされた注文は0円として平均を計算してほしい」なら後者です。
+実行結果：
+
+| id |
+|----|
+| 6  |
+
+```sql
+-- 複数列を RETURNING する
+INSERT INTO products (code, name, price, stock, category)
+VALUES ('WATER-001', 'スイカ', 800, 15, '果物')
+RETURNING id, code, name, created_at;
+```
+
+実行結果：
+
+| id | code       | name   | created_at          |
+|----|------------|--------|---------------------|
+| 7  | WATER-001  | スイカ | 2024-03-01 10:00:00 |
+
+```sql
+-- 全列を返す
+INSERT INTO products (code, name, price)
+VALUES ('MELON-001', 'メロン', 1200)
+RETURNING *;
+```
+
+> **ポイント**  
+> アプリケーション側で INSERT 直後に `lastInsertId` 的な値が必要な場合、  
+> RETURNING id を使えば追加の SELECT が不要です。  
+> パフォーマンス的にも優れており、PostgreSQL では積極的に使いましょう。
+
+---
+
+## 6. シーケンスの currval / nextval
+
+PostgreSQL の SERIAL 型は内部的にシーケンスを使っています。  
+シーケンスを直接操作することもできます。
+
+```sql
+-- 次の値を取得して進める（INSERT と同様の効果）
+SELECT nextval('products_id_seq');
+
+-- 現在のシーケンス値を確認（同一セッション内で nextval を呼んだ後のみ有効）
+SELECT currval('products_id_seq');
+
+-- シーケンス名を確認する
+SELECT pg_get_serial_sequence('products', 'id');
+-- 結果例: public.products_id_seq
+```
+
+```sql
+-- INSERT 後に currval で id を取得（RETURNING の方が推奨）
+INSERT INTO products (code, name, price) VALUES ('TEST-001', 'テスト', 100);
+SELECT currval('products_id_seq');
+```
 
 > **注意**  
-> NULL を除いた AVG が正しいのか、NULL を 0 として計算した AVG が正しいのかは  
-> 要件を確認しましょう。黙って NULL を無視すると集計の意味が変わることがあります。
+> `currval` は同一セッション内で `nextval` を呼んだ後でないと使えません。  
+> 別セッションでの INSERT とは独立しており、自分のセッションで最後に発行した値を返します。  
+> 実務では **RETURNING 句** を使う方がシンプルで安全です。
+
+---
+
+## 7. UPSERT（INSERT ON CONFLICT）の概念と使い所
+
+**UPSERT** とは「INSERT」と「UPDATE」を組み合わせた造語で、  
+「レコードがなければ挿入、あれば更新」という処理です。
+
+### なぜ UPSERT が必要か？
+
+たとえば「商品コードをユニークキーとして在庫を管理するテーブル」があるとします。  
+同じ商品コードで INSERT すると UNIQUE 制約違反になります。
+
+```sql
+-- これは2回目にエラーになる
+INSERT INTO products (code, name, price) VALUES ('APPLE-001', 'りんご', 150);
+-- ERROR: duplicate key value violates unique constraint "products_code_key"
+```
+
+UPSERT を使えば、「既存ならスキップ or 更新」とシームレスに処理できます。
+
+> **ポイント**  
+> UPSERT の典型的な使い所：  
+> - 外部システムからのデータ同期（あれば更新、なければ挿入）  
+> - 設定値のセーブ（ユーザーIDでユニークな設定テーブル）  
+> - 集計バッファの日次更新
 
 > **現場メモ**  
-> 月次レポートで「平均購入金額」を算出していたところ、あるキャンペーン後から数値が急に上振れしました。調べると、キャンペーンでキャンセル注文が増えて `amount` がNULLになった行が多数発生していました。`AVG(amount)` はNULLを除外するため、分母（注文件数）が実態より少なく計算されていました。本来は「キャンセル分も含めた平均」を求めたかったので、`AVG(COALESCE(amount, 0))` に修正しました。集計クエリを書く前には「NULLの行をどう扱うか」を必ずステークホルダーに確認する習慣が必要です。
+> UPSERTは便利ですが「DO NOTHINGにすべきかDO UPDATEにすべきか」の判断ミスによるバグが現場では発生します。例えば「ユーザーの最終ログイン時刻を更新したい」のにDO NOTHINGにしていたせいで初回以降のログイン時刻が更新されなかった、という事故がありました。逆に「初回登録日を上書きしたくない」のにDO UPDATEにしてしまい、再登録のたびに登録日が書き換わる問題も起きています。「競合した場合に何をしたいか」を明確にしてからDO NOTHING / DO UPDATEを選んでください。また、複数行をUPSERTするときに一部だけ競合する場合の挙動も確認しておくことをお勧めします。
 
 ---
 
-## 5. COUNT(DISTINCT 列名)
+## 8. INSERT ON CONFLICT DO NOTHING
 
-`DISTINCT` を `COUNT` の中に使うと、重複を排除した件数を取得できます。
+競合が発生した場合、エラーを出さずに何もしない（スキップする）パターンです。
 
 ```sql
--- 注文した顧客の数（重複なし）
-SELECT COUNT(DISTINCT customer_id) AS unique_customers FROM orders;
--- 結果: 4（customer_id: 101, 102, 103, 104）
--- COUNT(*) なら 7
-
--- 購入された商品の種類数
-SELECT COUNT(DISTINCT product) AS unique_products FROM orders;
--- 結果: 7（全商品が異なる）
+-- UNIQUE 制約（code 列）違反になった場合は何もしない
+INSERT INTO products (code, name, price, stock, category)
+VALUES ('APPLE-001', 'りんご', 150, 100, '果物')
+ON CONFLICT (code) DO NOTHING;
 ```
 
-### COUNT(*) との比較
+- 新規レコードの場合：挿入される
+- code='APPLE-001' が既に存在する場合：何も起きない（エラーなし）
 
 ```sql
-SELECT
-    COUNT(*)                    AS 全注文件数,     -- 7
-    COUNT(DISTINCT customer_id) AS ユニーク顧客数  -- 4
-FROM orders;
+-- DO NOTHING で複数行の一括 INSERT も安全になる
+INSERT INTO products (code, name, price, stock, category)
+VALUES
+    ('APPLE-001', 'りんご',  150, 100, '果物'),  -- 既存：スキップ
+    ('KIWI-001',  'キウイ',  200,  25, '果物')   -- 新規：挿入
+ON CONFLICT (code) DO NOTHING;
 ```
 
 > **ポイント**  
-> 「何人のユーザーがアクセスしたか」「何種類の商品が売れたか」のような  
-> 「ユニーク件数」を数えたい場合に `COUNT(DISTINCT 列名)` を使います。
+> DO NOTHING はべき等な INSERT（何度実行しても同じ結果になる処理）を  
+> 実現するのに便利です。  
+> バッチ処理や再実行可能なマイグレーションスクリプトでよく使われます。
 
 ---
 
-## 6. 複数の集計を1つのクエリで
+## 9. INSERT ON CONFLICT DO UPDATE SET（競合時の更新）
 
-1つの SELECT 文で複数の集計結果を取得できます。
+競合が発生した場合に、既存レコードを更新するパターンです。
 
 ```sql
-SELECT
-    COUNT(*)                    AS 総注文数,
-    COUNT(amount)               AS 金額が入力された注文数,
-    COUNT(DISTINCT customer_id) AS 注文した顧客数,
-    SUM(amount)                 AS 総売上,
-    ROUND(AVG(amount), 0)       AS 平均注文金額,
-    MAX(amount)                 AS 最高注文金額,
-    MIN(amount)                 AS 最低注文金額,
-    MAX(order_date)             AS 最新注文日,
-    MIN(order_date)             AS 最古注文日
-FROM orders;
+-- price と stock を最新値に更新する UPSERT
+INSERT INTO products (code, name, price, stock, category)
+VALUES ('APPLE-001', 'りんご', 180, 120, '果物')
+ON CONFLICT (code)
+DO UPDATE SET
+    price      = 180,
+    stock      = 120,
+    updated_at = NOW();
 ```
 
-このように1クエリで必要な集計値をまとめて取得できます。
-
----
-
-## 7. WHERE と組み合わせた集計
-
-`WHERE` で行を絞り込んでから集計できます。
-
 ```sql
--- 「完了」ステータスの注文のみ集計
-SELECT
-    COUNT(*) AS 完了注文数,
-    SUM(amount) AS 完了注文合計
-FROM orders
-WHERE status = '完了';
-
--- 2024年2月の注文のみ集計
-SELECT
-    COUNT(*) AS 2月注文数,
-    SUM(amount) AS 2月合計
-FROM orders
-WHERE order_date >= '2024-02-01'
-  AND order_date < '2024-03-01';
-
--- 特定の顧客の集計
-SELECT
-    COUNT(*) AS 注文回数,
-    SUM(amount) AS 合計購入額
-FROM orders
-WHERE customer_id = 101;
+-- 主キーの競合を対象にする場合は ON CONFLICT (id)
+INSERT INTO products (id, code, name, price, stock)
+VALUES (1, 'APPLE-001', 'りんご', 180, 120)
+ON CONFLICT (id)
+DO UPDATE SET
+    price = 180,
+    stock = 120;
 ```
 
 > **ポイント**  
-> WHERE は集計前にフィルタリングします。集計対象の行を限定したい場合は  
-> WHERE を使います。集計後にフィルタリングしたい場合は HAVING を使います（次章）。
+> `ON CONFLICT (列名)` の列には UNIQUE 制約または主キーが必要です。  
+> 通常の列（制約なし）は指定できません。
 
 ---
 
-## 8. 集計関数は WHERE には使えない（HAVING が必要な理由）
+## 10. EXCLUDED（競合した行の値を参照する）
 
-集計関数（SUM, COUNT など）を WHERE 句に書くとエラーになります。
-
-```sql
--- エラー：WHERE には集計関数を使えない
-SELECT customer_id, SUM(amount) AS total
-FROM orders
-WHERE SUM(amount) > 5000;  -- ERROR: aggregate functions are not allowed in WHERE
-```
-
-なぜ使えないのかというと、SQLの実行順序に理由があります。
-
-```
-実行順序：
-1. FROM    → テーブルを読む
-2. WHERE   → 行を絞り込む（この時点ではまだ集計されていない）
-3. GROUP BY → グループ化する
-4. 集計関数 → 集計する
-5. HAVING  → グループに条件をつける（集計後なのでここで使える）
-6. SELECT  → 返す列を決める
-7. ORDER BY → 並べ替える
-8. LIMIT   → 件数を制限する
-```
-
-WHERE が実行される時点では、まだ集計が行われていません。  
-集計後の値に条件を付けたい場合は HAVING を使います（次章で詳しく学びます）。
+DO UPDATE SET 内では `EXCLUDED` というキーワードを使って、  
+「今回 INSERT しようとした（競合した）行の値」を参照できます。
 
 ```sql
--- 正しい：集計後にフィルタリングするには HAVING を使う
-SELECT customer_id, SUM(amount) AS total
-FROM orders
-GROUP BY customer_id
-HAVING SUM(amount) > 5000;
+-- EXCLUDED を使って INSERT しようとした値をそのまま UPDATE に使う
+INSERT INTO products (code, name, price, stock, category)
+VALUES ('APPLE-001', 'りんご', 180, 120, '果物')
+ON CONFLICT (code)
+DO UPDATE SET
+    price      = EXCLUDED.price,      -- INSERT しようとした価格
+    stock      = EXCLUDED.stock,      -- INSERT しようとした在庫
+    name       = EXCLUDED.name,       -- INSERT しようとした名前
+    category   = EXCLUDED.category,
+    updated_at = NOW();
 ```
 
-> **注意**  
-> `WHERE` に集計関数を使おうとすると必ずエラーになります。  
-> 「グループの合計が〜以上」という条件は必ず `HAVING` を使います。
-
----
-
-## 9. FILTER 句（PostgreSQL、条件付き集計）
-
-PostgreSQL では `FILTER(WHERE 条件)` を集計関数に追加して条件付き集計ができます。  
-CASE 式より簡潔に書けます。
-
-### 構文
+### 条件付き更新（価格が下がったときだけ更新する）
 
 ```sql
-集計関数(引数) FILTER(WHERE 条件)
+-- 価格が安くなった場合のみ更新する
+INSERT INTO products (code, name, price, stock, category)
+VALUES ('APPLE-001', 'りんご', 130, 100, '果物')
+ON CONFLICT (code)
+DO UPDATE SET
+    price      = EXCLUDED.price,
+    updated_at = NOW()
+WHERE products.price > EXCLUDED.price;   -- 現在価格 > 新しい価格のときのみ
 ```
 
-### 基本的な使い方
+### 在庫を加算する
 
 ```sql
--- ステータス別の件数を1行で集計
-SELECT
-    COUNT(*) AS 全件数,
-    COUNT(*) FILTER(WHERE status = '完了') AS 完了件数,
-    COUNT(*) FILTER(WHERE status = 'キャンセル') AS キャンセル件数,
-    SUM(amount) FILTER(WHERE status = '完了') AS 完了金額合計
-FROM orders;
+-- 在庫を上書きするのではなく、競合時は加算する
+INSERT INTO products (code, name, price, stock, category)
+VALUES ('APPLE-001', 'りんご', 150, 50, '果物')
+ON CONFLICT (code)
+DO UPDATE SET
+    stock      = products.stock + EXCLUDED.stock,  -- 既存在庫 + 追加在庫
+    updated_at = NOW();
 ```
 
-### CASE 式との比較
-
-```sql
--- CASE を使った書き方（古い方法）
-SELECT
-    COUNT(*) AS 全件数,
-    SUM(CASE WHEN status = '完了' THEN 1 ELSE 0 END) AS 完了件数,
-    SUM(CASE WHEN status = '完了' THEN amount ELSE 0 END) AS 完了金額合計
-FROM orders;
-
--- FILTER を使った書き方（PostgreSQL推奨）
-SELECT
-    COUNT(*) AS 全件数,
-    COUNT(*) FILTER(WHERE status = '完了') AS 完了件数,
-    SUM(amount) FILTER(WHERE status = '完了') AS 完了金額合計
-FROM orders;
-```
+`products.stock` は「既存の値」、`EXCLUDED.stock` は「INSERT しようとした値」を指します。
 
 > **ポイント**  
-> `FILTER` は SQL:2003 標準の構文です。PostgreSQL 9.4 以降で使えます。  
-> CASE を使った書き方より意図が明確で読みやすくなります。
-
-> **現場メモ**  
-> `FILTER` 句はPostgreSQLを使っているなら積極的に採用したい機能です。以前は `SUM(CASE WHEN status = '完了' THEN amount ELSE 0 END)` のような書き方をしていましたが、条件が増えるとCASE式が入れ子になって読みにくくなっていました。`FILTER` を知ってからはコードレビューで「これはFILTER句で書けますよ」と提案するようになりました。新規コードはFILTER句に統一することで可読性が上がります。ただしMySQL等に移植するときはFILTER句が使えないので注意が必要です。
+> EXCLUDED を使うと、INSERT 時に指定した値を DO UPDATE 側でも再利用できます。  
+> ハードコードを避けられるため、カラムが増えても保守しやすいコードになります。
 
 ---
 
-## 10. よくあるミスと対処法
+## 11. よくあるミス
 
-### ミス1: COUNT(*) と COUNT(列名) を混同する
-
-```sql
--- 「NULLを除いた件数」が欲しいのに COUNT(*) を使う
-SELECT COUNT(*) FROM orders WHERE status = '完了';
--- NULLは既にWHEREで絞られているので問題ないが、意図を意識しよう
-
--- NULL を含む列の件数なら COUNT(列名) を使う
-SELECT COUNT(amount) FROM orders;  -- amountがNULLの行は除外
-```
-
-### ミス2: AVG の分母を誤解する
+### ミス1：列名を省略して列数の不一致エラー
 
 ```sql
--- 「全7件の平均」を期待しているが、NULLが除外されて6件の平均になる
-SELECT AVG(amount) FROM orders;  -- 2800 (16800/6)
-
--- 全7件を分母にしたい場合
-SELECT SUM(amount) / COUNT(*) FROM orders;  -- 2400 (16800/7)
--- ただしこれだと整数除算になる可能性があるので
-SELECT SUM(COALESCE(amount, 0)) / COUNT(*) FROM orders;
+-- NG：列数が合わない
+INSERT INTO products VALUES ('APPLE-001', 'りんご', 150);
+-- ERROR: INSERT has more target columns than expressions
 ```
 
-### ミス3: 集計結果に NULL が返ってくる
+**対処法：** 列名を明示するか、テーブルの全列分の値を指定する。
 
 ```sql
--- 集計対象が0件の場合、SUM/AVGはNULLを返す（COUNTは0を返す）
-SELECT SUM(amount) FROM orders WHERE customer_id = 999;
--- 結果: NULL（対象行が0件）
-
--- NULLを0として扱いたい場合
-SELECT COALESCE(SUM(amount), 0) AS total FROM orders WHERE customer_id = 999;
--- 結果: 0
+-- OK：列名を明示
+INSERT INTO products (code, name, price)
+VALUES ('APPLE-001', 'りんご', 150);
 ```
 
-### ミス4: WHERE に集計関数を書いてしまう
+### ミス2：UNIQUE 制約違反を DO NOTHING と思ったら DO UPDATE だった（逆も然り）
+
+DO NOTHING と DO UPDATE は目的が異なります。  
+- 「2重登録を防ぎたいだけ」→ DO NOTHING  
+- 「最新データで上書きしたい」→ DO UPDATE SET
+
+### ミス3：ON CONFLICT に制約のない列を指定する
 
 ```sql
--- エラー
-SELECT customer_id FROM orders WHERE COUNT(*) > 3;
-
--- 正しい（GROUP BY + HAVING を使う）
-SELECT customer_id, COUNT(*) AS cnt FROM orders
-GROUP BY customer_id
-HAVING COUNT(*) > 3;
+-- NG：category には UNIQUE 制約がない
+INSERT INTO products (code, name, price, category)
+VALUES ('APPLE-001', 'りんご', 150, '果物')
+ON CONFLICT (category) DO NOTHING;
+-- ERROR: there is no unique or exclusion constraint matching the ON CONFLICT specification
 ```
 
-> **注意**  
-> `SUM`・`COUNT` 等の集計関数は `SELECT` 句か `HAVING` 句でしか使えません。  
-> `WHERE` 句に書くとエラーになります。
+**対処法：** ON CONFLICT に指定できるのは UNIQUE 制約か主キーの列のみ。
 
----
+### ミス4：INSERT の値の型が違う
 
-## 11. PRレビューのチェックポイント
+```sql
+-- NG：price は INTEGER なのに文字列を入れる
+INSERT INTO products (code, name, price)
+VALUES ('APPLE-001', 'りんご', '百五十円');
+-- ERROR: invalid input syntax for type integer: "百五十円"
+```
 
-- [ ] `AVG` を使う場合、NULLを除外した平均でよいか要件を確認しているか
-- [ ] 集計結果が0件の場合に `SUM`・`AVG` が NULL を返すケースに `COALESCE` を適用しているか
-- [ ] `COUNT(*)` と `COUNT(列名)` の使い分けが意図に合っているか
-- [ ] 条件付き集計に `CASE` 式ではなく `FILTER` 句を使えないか（可読性向上）
-- [ ] WHERE句で集計関数を使おうとしていないか（HAVING を使う）
-- [ ] 金額集計でオーバーフローの可能性を考慮しているか（大量データ×高単価）
+**対処法：** 数値型の列には数値を渡す。文字列から変換が必要なら `CAST` か `::` を使う。
+
+```sql
+-- OK
+INSERT INTO products (code, name, price)
+VALUES ('APPLE-001', 'りんご', '150'::INTEGER);
+```
 
 ---
 
 ## 12. まとめ
 
 | テーマ | 要点 |
-|--------|------|
-| 集計関数の基本 | 複数行を1つの値に集約する |
-| COUNT(*) | NULL を含む全行数をカウント |
-| COUNT(列名) | NULL を除いた行数をカウント |
-| SUM | NULL を無視して合計を計算 |
-| AVG | NULL を除外した平均を計算（分母に注意）|
-| MAX / MIN | NULL を無視して最大値・最小値を返す |
-| COUNT(DISTINCT) | 重複を排除した件数を取得 |
-| NULL の影響 | 集計関数は NULL を無視する。意図を確認すること |
-| WHERE と集計 | WHERE で行を絞り込んでから集計できる |
-| WHERE には使えない | 集計結果への条件は HAVING を使う |
-| FILTER 句 | 条件付き集計をシンプルに書ける（PostgreSQL）|
+| --- | --- |
+| INSERT 基本構文 | `INSERT INTO テーブル (列...) VALUES (値...)` 列名を明示するのが安全 |
+| 列の省略 | DEFAULT 値が入る。DEFAULT がなく NOT NULL なら挿入エラー |
+| 複数行 INSERT | VALUES に複数組を指定。ループより高速でオススメ |
+| INSERT ... SELECT | SELECT 結果をそのまま挿入。ETL・バックアップに活用 |
+| RETURNING 句 | 挿入した行の値（自動採番 id など）を取得できる |
+| currval / nextval | シーケンスの現在値・次値を取得する。RETURNING の方が推奨 |
+| UPSERT の概念 | INSERT + UPDATE。「なければ挿入、あれば更新」 |
+| DO NOTHING | 競合時にスキップ。べき等な INSERT に便利 |
+| DO UPDATE SET | 競合時に既存行を更新。更新列を明示的に指定する |
+| EXCLUDED | INSERT しようとした行の値を参照するキーワード |
+| よくあるミス | 列数不一致 / 制約のない列への ON CONFLICT / 型の不一致 |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS products (
+  id    SERIAL PRIMARY KEY,
+  code  TEXT    UNIQUE NOT NULL,
+  name  TEXT    NOT NULL,
+  price INTEGER NOT NULL,
+  stock INTEGER NOT NULL DEFAULT 0
+);
+DELETE FROM products;
+```
+
+### 問題1: 単行 INSERT と RETURNING
+
+> 参照：[1. INSERT の基本構文](#1-insert-の基本構文) ・ [5. RETURNING 句](#5-returning-句)
+
+`products` テーブルに商品を1件追加し、自動採番された `id` を取得してください。
+
+- code: `'ABC-001'`
+- name: `'ワイヤレスマウス'`
+- price: `4800`
+- stock: `20`
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+INSERT INTO products (code, name, price, stock)
+VALUES ('ABC-001', 'ワイヤレスマウス', 4800, 20)
+RETURNING id;
+```
+
+**解説：** `RETURNING id` を付けることで、INSERT によって生成された `id` を即座に取得できます。アプリケーション側でIDを使った後続処理（ログ書き込みなど）をする際に便利です。
+
+</details>
+
+### 問題2: 複数行 INSERT
+
+> 参照：[3. 複数行の INSERT](#3-複数行の-insert)
+
+以下の3件を一度の INSERT で追加してください。
+
+| code | name | price | stock |
+|------|------|-------|-------|
+| `'KBD-001'` | `'メカニカルキーボード'` | 12000 | 15 |
+| `'MON-001'` | `'27インチモニター'` | 38000 | 8 |
+| `'HUB-001'` | `'USBハブ 7ポート'` | 3200 | 40 |
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+INSERT INTO products (code, name, price, stock)
+VALUES
+  ('KBD-001', 'メカニカルキーボード', 12000, 15),
+  ('MON-001', '27インチモニター',     38000,  8),
+  ('HUB-001', 'USBハブ 7ポート',      3200,  40);
+```
+
+**解説：** `VALUES` の後に `(...)` をカンマ区切りで並べると1文で複数行を挿入できます。個別に INSERT を繰り返すよりネットワーク往復が減り効率的です。
+
+</details>
+
+### 問題3: UPSERT
+
+> 参照：[7. UPSERT の概念と使い所](#7-upsertinsert-on-conflictの概念と使い所) ・ [9. INSERT ON CONFLICT DO UPDATE SET](#9-insert-on-conflict-do-update-set競合時の更新) ・ [10. EXCLUDED](#10-excluded競合した行の値を参照する)
+
+`code = 'ABC-001'` の商品が既に存在する場合は `price` と `stock` を更新し、存在しない場合は新規追加するクエリを書いてください。
+
+- price: `5200`
+- stock: `35`
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+INSERT INTO products (code, name, price, stock)
+VALUES ('ABC-001', 'ワイヤレスマウス', 5200, 35)
+ON CONFLICT (code)
+DO UPDATE SET
+  price = EXCLUDED.price,
+  stock = EXCLUDED.stock;
+```
+
+**解説：** `ON CONFLICT (code)` は `code` の UNIQUE 制約違反が発生したときの処理を指定します。`EXCLUDED` は INSERT しようとした値を参照する特別なテーブル名です。これにより「存在すれば更新、なければ挿入」の冪等な操作が1クエリで実現できます。
+
+</details>

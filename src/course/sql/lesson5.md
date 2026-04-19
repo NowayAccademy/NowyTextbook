@@ -535,14 +535,14 @@ SELECT * FROM orders WHERE DATE_PART('month', order_date) = 3;
 
 ---
 
-## 9. PRレビューのチェックポイント
+## 9. ポイント
 
-- [ ] `WHERE` 句の列に関数を適用していないか（インデックスが効かなくなる）
-- [ ] 大文字小文字を無視した検索に `LOWER()` を使う場合、関数インデックスの対応があるか
-- [ ] 日付の `BETWEEN` で TIMESTAMP型の月末・日末が漏れていないか
-- [ ] タイムゾーンを意識した日付計算になっているか（`AT TIME ZONE` の明示）
-- [ ] 金額計算に `NUMERIC` 型を使っているか（`FLOAT` や `REAL` は丸め誤差が発生する）
-- [ ] `CAST` で変換できない値が来た場合のエラーハンドリングを考慮しているか
+- `WHERE` 句の列に関数を適用していないか（インデックスが効かなくなる）
+- 大文字小文字を無視した検索に `LOWER()` を使う場合、関数インデックスの対応があるか
+- 日付の `BETWEEN` で TIMESTAMP型の月末・日末が漏れていないか
+- タイムゾーンを意識した日付計算になっているか（`AT TIME ZONE` の明示）
+- 金額計算に `NUMERIC` 型を使っているか（`FLOAT` や `REAL` は丸め誤差が発生する）
+- `CAST` で変換できない値が来た場合のエラーハンドリングを考慮しているか
 
 ---
 
@@ -562,3 +562,81 @@ SELECT * FROM orders WHERE DATE_PART('month', order_date) = 3;
 | TO_CHAR | 日付・数値を指定フォーマットの文字列に変換 |
 | TO_DATE | 文字列を日付型に変換 |
 | WHERE 句と関数 | 列に関数を適用するとインデックスが効かなくなる |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS employees (
+  id         INTEGER PRIMARY KEY,
+  first_name TEXT    NOT NULL,
+  last_name  TEXT    NOT NULL,
+  hire_date  DATE,
+  salary     INTEGER
+);
+DELETE FROM employees;
+INSERT INTO employees (id, first_name, last_name, hire_date, salary) VALUES
+  (1, '太郎', '田中', '2020-04-01', 320000),
+  (2, '花子', '鈴木', '2018-10-15', 410000),
+  (3, '一郎', '佐藤', '2023-01-10', 280000),
+  (4, '次郎', '山田', '2021-07-01', 350000);
+```
+
+### 問題1: 文字列結合でフルネームを作成
+
+> 参照：[1. 文字列関数](#1-文字列関数)
+
+`first_name` と `last_name` を結合して `'田中 太郎'` のような形式の `full_name` を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT last_name || ' ' || first_name AS full_name
+FROM employees;
+```
+
+**解説：** `||` は文字列連結演算子です。`CONCAT` でも書けますが、`||` はどちらかが NULL の場合に NULL を返すため、NULL が含まれないことが確実な場合はシンプルです。スペースはシングルクォートで文字列リテラルとして挟みます。
+
+</details>
+
+### 問題2: 給与の切り捨て
+
+> 参照：[2. 数値関数](#2-数値関数)
+
+`salary` を 10000 円単位で切り捨てた値を `salary_floored` として取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT first_name, last_name,
+  FLOOR(salary / 10000) * 10000 AS salary_floored
+FROM employees;
+```
+
+**解説：** `FLOOR` は小数点以下を切り捨てます。`salary / 10000` で万円単位にしてから `FLOOR` し、再度 10000 を掛けることで 10000 円単位に揃えます。
+
+</details>
+
+### 問題3: 勤続年数の計算
+
+> 参照：[3. 日付・時刻関数](#3-日付・時刻関数)
+
+今日の日付（`CURRENT_DATE`）から `hire_date` を引いて、勤続年数を整数で取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT first_name, last_name,
+  EXTRACT(YEAR FROM AGE(CURRENT_DATE, hire_date)) AS years_of_service
+FROM employees;
+```
+
+**解説：** `AGE(終了日, 開始日)` は2つの日付の差を interval 型で返します。`EXTRACT(YEAR FROM ...)` でその年数部分を取り出します。単純な引き算（`CURRENT_DATE - hire_date`）は日数差になるので年数への変換には `EXTRACT` や `AGE` を使います。
+
+</details>

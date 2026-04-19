@@ -524,15 +524,15 @@ CREATE TABLE products (
 
 ---
 
-## 9. PRレビューのチェックポイント
+## 9. ポイント
 
-- [ ] **繰り返しグループ（複数値を1カラムにカンマ区切りで持つなど）がないか（1NF）**
+- **繰り返しグループ（複数値を1カラムにカンマ区切りで持つなど）がないか（1NF）**
   - `tags: "A,B,C"` のような設計は検索・更新が困難になる
-- [ ] **部分関数従属がないか（2NF）— 複合主キーを使う場合は特に確認**
+- **部分関数従属がないか（2NF）— 複合主キーを使う場合は特に確認**
   - 主キーの一部だけに依存するカラムは別テーブルに分割する
-- [ ] **「意図的な非正規化」にコメントがあるか**
+- **「意図的な非正規化」にコメントがあるか**
   - パフォーマンス上の理由でデノーマライズしている場合は、なぜ非正規化したかを明記する
-- [ ] **JOINが多くなりすぎていないか（正規化しすぎの兆候）**
+- **JOINが多くなりすぎていないか（正規化しすぎの兆候）**
   - 1クエリで5テーブル以上JOINが必要になる場合は設計の見直しを検討
 
 ---
@@ -550,3 +550,129 @@ CREATE TABLE products (
 | 3NF | 非キー属性間の推移関数従属を排除する |
 | 非正規化 | 意図的な冗長化。パフォーマンスや履歴保持のために行う |
 | よくあるミス | ENUMの多用・NULL乱用・文字列でのデータコピー |
+
+---
+
+## 練習問題
+
+### 問題1: 第1正規形（1NF）の適用
+
+> 参照：[3. 第1正規形（1NF）](#3-第1正規形1nf繰り返しグループの排除・原子値)
+
+以下のテーブルは非正規形です。第1正規形に変換してください。
+
+```
+orders テーブル（非正規形）
+| order_id | customer | products               |
+|----------|----------|------------------------|
+|        1 | 田中     | ノートPC, マウス       |
+|        2 | 鈴木     | キーボード             |
+```
+
+<details>
+<summary>回答を見る</summary>
+
+**第1正規形（1NF）：セルに複数値を持たせない**
+
+```sql
+-- 1NF: 1セル1値
+CREATE TABLE order_items (
+  order_id    INTEGER NOT NULL,
+  customer    TEXT NOT NULL,
+  product     TEXT NOT NULL,
+  PRIMARY KEY (order_id, product)
+);
+
+-- データ
+-- order_id | customer | product
+--        1 | 田中     | ノートPC
+--        1 | 田中     | マウス
+--        2 | 鈴木     | キーボード
+```
+
+**解説：** 1NF の条件は「各カラムが原子値（分割できない単一値）を持つ」ことです。`'ノートPC, マウス'` のようなカンマ区切りは1NF違反です。ただし、この状態ではまだ `customer` が `order_id` に依存しており、2NF・3NF への変換が続きます。
+
+</details>
+
+### 問題2: 第2正規形（2NF）と第3正規形（3NF）
+
+> 参照：[4. 第2正規形（2NF）](#4-第2正規形2nf部分関数従属の排除) ・ [5. 第3正規形（3NF）](#5-第3正規形3nf推移関数従属の排除)
+
+問題1の1NF テーブルを2NF、さらに3NFへと変換してください（注：`customer` は `order_id` に依存し、`product` だけには依存しない）。
+
+<details>
+<summary>回答を見る</summary>
+
+**2NF への変換：部分関数従属を排除**
+
+複合主キー `(order_id, product)` に対して `customer` は `order_id` だけに依存しているため分離します。
+
+```sql
+-- orders テーブル（order_id → customer）
+CREATE TABLE orders (
+  order_id INTEGER PRIMARY KEY,
+  customer TEXT NOT NULL
+);
+
+-- order_items テーブル
+CREATE TABLE order_items (
+  order_id INTEGER NOT NULL REFERENCES orders(order_id),
+  product  TEXT NOT NULL,
+  PRIMARY KEY (order_id, product)
+);
+```
+
+**3NF への変換：推移関数従属を排除**
+
+`customer` が氏名以外の情報（例：住所・メール）を持つ場合、それは customer に依存するため更に分離します。
+
+```sql
+CREATE TABLE customers (
+  id       BIGSERIAL PRIMARY KEY,
+  name     TEXT NOT NULL,
+  email    TEXT
+);
+
+CREATE TABLE orders (
+  order_id    INTEGER PRIMARY KEY,
+  customer_id BIGINT NOT NULL REFERENCES customers(id)
+);
+```
+
+**解説：** 2NF は「複合主キーの一部にしか依存しないカラムを分離」、3NF は「主キー以外のカラムに依存するカラムをさらに分離」です。正規化を進めるほど更新異常が減りますが、JOIN が増えることとのバランスが重要です。
+
+</details>
+
+### 問題3: 非正規化の判断
+
+> 参照：[7. 正規化のデメリットと非正規化](#7-正規化のデメリットと非正規化現場での判断)
+
+以下のシナリオで、意図的な非正規化が適切かどうか判断してください。
+
+> ECサイトの注文確認ページで「注文者名・商品名・購入時価格」を表示する。現在は `orders` → `customers` → `products` を毎回 JOIN して取得しているが、ページの表示が遅い。
+
+<details>
+<summary>回答を見る</summary>
+
+**適切：注文時点の情報を非正規化して保持する**
+
+```sql
+CREATE TABLE order_items (
+  id              BIGSERIAL PRIMARY KEY,
+  order_id        BIGINT NOT NULL REFERENCES orders(id),
+  product_id      BIGINT NOT NULL REFERENCES products(id),
+  -- 注文時点のスナップショット（非正規化）
+  product_name    TEXT NOT NULL,
+  unit_price      NUMERIC(10,2) NOT NULL,
+  quantity        INTEGER NOT NULL
+);
+```
+
+**理由：**
+- 商品名や価格は変更される可能性があるため、注文時点の値を保持することは業務的にも正しい（請求書の記録として）
+- JOIN を減らしてパフォーマンスを改善できる
+- これは「意図的な非正規化」であり、設計コメントに理由を記録しておく
+
+**解説：** 非正規化は「パフォーマンスのため」と「業務的な履歴保持のため」の2種類があります。どちらの場合も、冗長化した理由をドキュメントやコメントに残すことが重要です。
+
+</details>

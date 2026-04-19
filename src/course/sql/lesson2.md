@@ -386,13 +386,13 @@ LIMIT 0;
 
 ---
 
-## 12. PRレビューのチェックポイント
+## 12. ポイント
 
-- [ ] `LIMIT` を使っているクエリに `ORDER BY` がセットになっているか
-- [ ] ページングに大きな `OFFSET` を使っていないか（件数が増えると遅くなる）
-- [ ] `ORDER BY` なしのページングになっていないか（毎回異なる結果になりうる）
-- [ ] `DISTINCT ON` を使っている場合、`ORDER BY` の先頭列と `DISTINCT ON` の列が一致しているか
-- [ ] アプリ側から `LIMIT` の値を渡す場合、0や負の値をバリデーションしているか
+- `LIMIT` を使っているクエリに `ORDER BY` がセットになっているか
+- ページングに大きな `OFFSET` を使っていないか（件数が増えると遅くなる）
+- `ORDER BY` なしのページングになっていないか（毎回異なる結果になりうる）
+- `DISTINCT ON` を使っている場合、`ORDER BY` の先頭列と `DISTINCT ON` の列が一致しているか
+- アプリ側から `LIMIT` の値を渡す場合、0や負の値をバリデーションしているか
 
 ---
 
@@ -410,3 +410,85 @@ LIMIT 0;
 | DISTINCT | 重複する行を排除して取得する |
 | DISTINCT ON | PostgreSQL 固有。特定列が同じ行のうち1行だけ残す |
 | ORDER BY なしの LIMIT | 結果の順序が保証されないため必ず ORDER BY とセットで使う |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS products (
+  id       INTEGER PRIMARY KEY,
+  name     TEXT    NOT NULL,
+  price    INTEGER NOT NULL,
+  category TEXT    NOT NULL,
+  stock    INTEGER NOT NULL
+);
+DELETE FROM products;
+INSERT INTO products (id, name, price, category, stock) VALUES
+  (1, 'ノートPC',     98000, 'PC',       10),
+  (2, 'マウス',        3500, '周辺機器', 50),
+  (3, 'キーボード',    8000, '周辺機器',  0),
+  (4, 'モニター',     42000, 'PC',        5),
+  (5, 'USBハブ',      2800, '周辺機器',  30),
+  (6, 'タブレット',   65000, 'PC',        8);
+```
+
+### 問題1: 価格の高い順に上位3件
+
+> 参照：[1. ORDER BY の基本](#1-order-by-の基本asc-desc) ・ [4. LIMIT で件数を制限する](#4-limit-で件数を制限する)
+
+`price` の高い順に上位3件の `name` と `price` を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT name, price
+FROM products
+ORDER BY price DESC
+LIMIT 3;
+```
+
+**解説：** `ORDER BY price DESC` で降順に並べ、`LIMIT 3` で先頭3件に絞ります。結果はノートPC・タブレット・モニターです。
+
+</details>
+
+### 問題2: カテゴリの重複排除
+
+> 参照：[8. DISTINCT で重複排除](#8-distinct-で重複排除)
+
+`products` テーブルに存在する `category` の一覧を重複なく取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT DISTINCT category
+FROM products;
+```
+
+**解説：** `DISTINCT` を付けることで重複行を除去します。6件のデータから `PC` と `周辺機器` の2種類が返ります。
+
+</details>
+
+### 問題3: 複合ソートとページング
+
+> 参照：[2. 複数列の ORDER BY](#2-複数列の-order-by優先順位) ・ [6. ページングの基本](#6-ページングの基本limit-offset)
+
+`category` の昇順・同一カテゴリ内では `price` の降順で並べ、3件目から2件取得してください（2ページ目相当）。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT name, category, price
+FROM products
+ORDER BY category ASC, price DESC
+LIMIT 2 OFFSET 2;
+```
+
+**解説：** `ORDER BY` に複数カラムを指定すると、1つ目のキーで並べた後、同じ値の行を2つ目のキーで並べます。`OFFSET 2` で先頭2件をスキップし、`LIMIT 2` で次の2件を取得します。
+
+</details>

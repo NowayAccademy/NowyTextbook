@@ -522,35 +522,35 @@ SELECT * FROM users WHERE email = 'alice@example.com';
 SELECT email, name FROM users WHERE email = 'alice@example.com';
 ```
 
-## 12. PRレビューのチェックポイント
+## 12. ポイント
 
 シニアエンジニアがインデックスに関連するコードレビューで確認するポイントをまとめます。
 
 ### テーブル作成・変更時の確認
 
-- [ ] **外部キー列にインデックスが貼られているか**
+- **外部キー列にインデックスが貼られているか**
   - `REFERENCES` を持つ列には必ず対応するインデックスを確認する
-- [ ] **新しいテーブルのWHERE句で使われる列にインデックスがあるか**
+- **新しいテーブルのWHERE句で使われる列にインデックスがあるか**
   - APIのクエリを見て「この絞り込み列にインデックスはありますか？」と確認する
-- [ ] **複合インデックスの列順は正しいか**
+- **複合インデックスの列順は正しいか**
   - 最左一致の原則に従い、よく使う検索条件の列が左にあるか
 
 ### インデックス追加時の確認
 
-- [ ] **本番環境では `CREATE INDEX CONCURRENTLY` を使っているか**
+- **本番環境では `CREATE INDEX CONCURRENTLY` を使っているか**
   - マイグレーションファイルに通常の `CREATE INDEX` が含まれていないか
-- [ ] **EXPLAINで実際にインデックスが使われることを確認したか**
+- **EXPLAINで実際にインデックスが使われることを確認したか**
   - インデックス追加のPRにはEXPLAINの結果を添付することを推奨する
-- [ ] **既存のインデックスと重複していないか**
+- **既存のインデックスと重複していないか**
   - 同じ列への似たようなインデックスが既にないか `pg_indexes` で確認する
 
 ### パフォーマンス全般の確認
 
-- [ ] **このWHERE句にインデックスはありますか？**
+- **このWHERE句にインデックスはありますか？**
   - 新しいクエリが追加されたとき、使われている列にインデックスがあるか確認する
-- [ ] **書き込みが多いテーブルへのインデックス追加は、INSERT/UPDATE性能への影響を測定したか**
+- **書き込みが多いテーブルへのインデックス追加は、INSERT/UPDATE性能への影響を測定したか**
   - 読み取り性能だけでなく書き込みコストのトレードオフを評価しているか
-- [ ] **使われていないインデックスが残っていないか**
+- **使われていないインデックスが残っていないか**
   - リファクタリング後に古いインデックスが残っていないか定期的に確認する
 
 ## 13. まとめ
@@ -567,3 +567,95 @@ SELECT email, name FROM users WHERE email = 'alice@example.com';
 | 貼りすぎのデメリット | INSERT/UPDATE/DELETE が遅くなる・ストレージ消費 |
 | CONCURRENTLY | 本番環境でのインデックス追加にはこれを使う |
 | 現場での原則 | インデックスは「読み取り性能」と「書き込み性能」のトレードオフ |
+
+---
+
+## 練習問題
+
+### 問題1: インデックスの追加
+
+> 参照：[5. インデックスを貼る列の選び方](#5-インデックスを貼る列の選び方) ・ [6. 複合インデックスの列順](#6-複合インデックスの列順最左一致の原則)
+
+`orders` テーブルに対して以下のクエリが頻繁に実行されます。適切なインデックスを追加してください。
+
+```sql
+-- クエリ1: 特定ユーザーの注文を最新順に取得
+SELECT * FROM orders WHERE user_id = 100 ORDER BY created_at DESC;
+
+-- クエリ2: ステータスが 'pending' の注文一覧
+SELECT * FROM orders WHERE status = 'pending';
+```
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+-- クエリ1用: user_id と created_at の複合インデックス
+CREATE INDEX idx_orders_user_created ON orders (user_id, created_at DESC);
+
+-- クエリ2用: status のインデックス
+-- ただし status のカーディナリティが低い（数種類しかない）場合は効果が薄い
+CREATE INDEX idx_orders_status ON orders (status) WHERE status = 'pending';
+```
+
+**解説：** クエリ1の複合インデックスは `WHERE user_id = ?` の絞り込みと `ORDER BY created_at DESC` の両方に使えます。クエリ2は `status` の値が数種類しかない場合（低カーディナリティ）、部分インデックス `WHERE status = 'pending'` にすることで対象行を絞り、インデックスサイズを小さく保てます。
+
+</details>
+
+### 問題2: インデックスの問題点の指摘
+
+> 参照：[7. インデックスが効かないパターン](#7-インデックスが効かないパターン)
+
+以下のクエリはインデックスが使われない可能性があります。その理由と対処法を説明してください。
+
+```sql
+-- usersテーブルのemailカラムにインデックスがある
+SELECT * FROM users WHERE UPPER(email) = 'TANAKA@EXAMPLE.COM';
+```
+
+<details>
+<summary>回答を見る</summary>
+
+**問題：** `UPPER(email)` のように関数でカラムを加工すると、インデックスが使われず全件スキャン（Seq Scan）になります。
+
+**対処法1：クエリを修正する（推奨）**
+```sql
+-- アプリ側で小文字に統一して検索
+SELECT * FROM users WHERE email = 'tanaka@example.com';
+```
+
+**対処法2：関数インデックスを作る**
+```sql
+CREATE INDEX idx_users_email_upper ON users (UPPER(email));
+-- これにより UPPER(email) = '...' のクエリでインデックスが使われる
+```
+
+**解説：** インデックスは「カラムの値」を保存しているため、関数で変換した値はインデックスと一致しません。関数インデックスは変換後の値をインデックスに保存する特別なインデックスです。ただし最もシンプルな解決策は「データの格納時に統一（例：常に小文字で保存）」することです。
+
+</details>
+
+### 問題3: 本番環境でのインデックス追加
+
+> 参照：[10. CREATE INDEX構文（CONCURRENTLYオプション）](#10-create-index構文concurrentlyオプション) ・ [8. EXPLAINで実際に確認するフロー](#8-explainで実際に確認するフロー)
+
+本番稼働中の `articles` テーブル（1億件）に `published_at` のインデックスを追加してください。通常の `CREATE INDEX` との違いも説明してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+CREATE INDEX CONCURRENTLY idx_articles_published_at ON articles (published_at);
+```
+
+**通常の `CREATE INDEX` との違い：**
+
+| | CREATE INDEX | CREATE INDEX CONCURRENTLY |
+|--|---|---|
+| テーブルロック | かかる（読み書き不可） | かからない（読み書き可能） |
+| 実行速度 | 速い | 遅い（2〜3倍の時間） |
+| 用途 | メンテナンス停止時 | 本番環境のオンライン追加 |
+| 失敗時 | すぐクリーンアップ | INVALID インデックスが残る |
+
+**解説：** 本番環境で通常の `CREATE INDEX` を実行するとテーブル全体がロックされ、その間の読み書きがブロックされます。`CONCURRENTLY` を付けると読み書きを妨げずにインデックスを構築できます。ただし途中で失敗すると無効な（INVALID）インデックスが残るため、`DROP INDEX CONCURRENTLY` で削除して再試行が必要です。
+
+</details>

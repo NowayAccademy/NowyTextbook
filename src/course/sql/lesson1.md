@@ -376,14 +376,14 @@ SELECT id, name FROM users WHERE age > 30;
 
 ---
 
-## 11. PRレビューのチェックポイント
+## 11. ポイント
 
-- [ ] `SELECT *` を使っていないか（本番コードでは列名を明示する）
-- [ ] 文字列比較でダブルクォートを使っていないか（シングルクォートが正しい）
-- [ ] NULL との比較に `= NULL` を使っていないか（`IS NULL` を使う）
-- [ ] AND/OR が混在している条件に括弧が付いているか
-- [ ] 列に適切な型の値を渡しているか（文字列列に数値を渡すなど型の混乱がないか）
-- [ ] FROM句が抜けていないか（SELECT のみで WHERE を書いていないか）
+- `SELECT *` を使っていないか（本番コードでは列名を明示する）
+- 文字列比較でダブルクォートを使っていないか（シングルクォートが正しい）
+- NULL との比較に `= NULL` を使っていないか（`IS NULL` を使う）
+- AND/OR が混在している条件に括弧が付いているか
+- 列に適切な型の値を渡しているか（文字列列に数値を渡すなど型の混乱がないか）
+- FROM句が抜けていないか（SELECT のみで WHERE を書いていないか）
 
 ---
 
@@ -401,3 +401,85 @@ SELECT id, name FROM users WHERE age > 30;
 | 括弧の活用 | 複雑な条件は括弧で評価順を明示する |
 | 値の書き方 | 数値はそのまま、文字列と日付はシングルクォート |
 | NULL の比較 | `= NULL` ではなく `IS NULL` を使う |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+  id         INTEGER PRIMARY KEY,
+  name       TEXT    NOT NULL,
+  age        INTEGER,
+  email      TEXT,
+  department TEXT
+);
+DELETE FROM users;
+INSERT INTO users (id, name, age, email, department) VALUES
+  (1, '田中太郎', 28, 'tanaka@example.com',   '営業'),
+  (2, '鈴木花子', 34, 'suzuki@example.com',   '開発'),
+  (3, '佐藤次郎', 22, 'sato@example.com',     '営業'),
+  (4, '山田三郎', 45, NULL,                   '管理'),
+  (5, '中村四郎', 31, 'nakamura@example.com', '開発');
+```
+
+### 問題1: 条件を組み合わせた絞り込み
+
+> 参照：[5. WHERE による条件絞り込み](#5-where-による条件絞り込み) ・ [7. AND / OR / NOT の使い方と優先順位](#7-and-or-not-の使い方と優先順位)
+
+`department` が `'開発'` で、かつ `age` が 30 以上の社員の `name` と `age` を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT name, age
+FROM users
+WHERE department = '開発'
+  AND age >= 30;
+```
+
+**解説：** AND で2つの条件を組み合わせます。`department = '開発'` と `age >= 30` の両方を満たす行だけが返ります。結果は鈴木花子（34歳）と中村四郎（31歳）です。
+
+</details>
+
+### 問題2: OR と括弧の活用
+
+> 参照：[7. AND / OR / NOT の使い方と優先順位](#7-and-or-not-の使い方と優先順位) ・ [8. カッコによる優先順位の制御](#8-カッコによる優先順位の制御)
+
+`department` が `'営業'` **または** `age` が 25 歳以下の社員の `name`・`department`・`age` を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT name, department, age
+FROM users
+WHERE department = '営業'
+   OR age <= 25;
+```
+
+**解説：** OR はどちらか一方でも満たせば該当します。田中太郎（営業）・佐藤次郎（営業 かつ 22歳）が返ります。AND と OR が混在する場合は括弧で優先順位を明示しましょう。
+
+</details>
+
+### 問題3: NULL の検索
+
+> 参照：[5. WHERE による条件絞り込み](#5-where-による条件絞り込み) ・ [10. よくあるミスと対処法](#10-よくあるミスと対処法)
+
+`email` が登録されていない（NULL の）社員の `name` を取得してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT name
+FROM users
+WHERE email IS NULL;
+```
+
+**解説：** NULL との比較には `= NULL` ではなく `IS NULL` を使います。`WHERE email = NULL` は常に偽となるため、意図した結果が得られません。結果は山田三郎です。
+
+</details>

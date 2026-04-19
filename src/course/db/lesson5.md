@@ -351,17 +351,17 @@ CREATE TABLE order_items (
 | 外部キー違反（挿入） | 存在しない親IDを指定した | 親のレコードを先に作成する |
 | 外部キー違反（削除） | 子が存在する親を削除しようとした | 子を先に削除するか、CASCADEを設定する |
 
-## PRレビューのチェックポイント
+## ポイント
 
-- [ ] **NOT NULL にすべきカラムが NULL 許容になっていないか**
+- **NOT NULL にすべきカラムが NULL 許容になっていないか**
   - 「後から NOT NULL に変えるのは大変」。設計時に決める
-- [ ] **UNIQUE 制約が必要なカラムに制約が付いているか**
+- **UNIQUE 制約が必要なカラムに制約が付いているか**
   - アプリ側だけで重複チェックをしていると、並行リクエストで重複が入ることがある
-- [ ] **論理削除テーブルの UNIQUE 制約が部分インデックスになっているか**
+- **論理削除テーブルの UNIQUE 制約が部分インデックスになっているか**
   - 削除済みデータとの衝突を防ぐには `WHERE deleted_at IS NULL` の部分インデックスが必要
-- [ ] **外部キー制約に CASCADE の設定が要件と一致しているか**
+- **外部キー制約に CASCADE の設定が要件と一致しているか**
   - 親を消したとき子も消えるのか、子が残るとエラーにするのかを明確に
-- [ ] **本番テーブルへの制約追加で、既存データが違反しないか事前確認したか**
+- **本番テーブルへの制約追加で、既存データが違反しないか事前確認したか**
   - `SELECT count(*) WHERE col IS NULL` などで確認してから制約を追加する
 
 ---
@@ -377,3 +377,86 @@ CREATE TABLE order_items (
 | DEFAULT | 省略時の自動値。CURRENT_TIMESTAMP、0、FALSEなどが定番 |
 | 外部キー | 参照整合性を保証。ON DELETE の動作を理解して設定する |
 | 制約名 | カスタム名を付けるとエラーメッセージが読みやすい |
+
+---
+
+## 練習問題
+
+### 問題1: 制約の追加
+
+> 参照：[1. なぜ制約が必要か](#1-なぜ制約が必要か) ・ [4. CHECK制約](#4-check制約) ・ [5. DEFAULT値](#5-default値)
+
+以下の要件を満たす `products` テーブルを定義してください。
+
+- id：自動採番の主キー
+- name：必須、255文字以内
+- price：必須、0以上の整数
+- stock：デフォルト 0、0以上
+- category：`'food'`, `'electronics'`, `'clothing'` のいずれか
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+CREATE TABLE products (
+  id       BIGSERIAL PRIMARY KEY,
+  name     VARCHAR(255) NOT NULL,
+  price    INTEGER NOT NULL CHECK (price >= 0),
+  stock    INTEGER NOT NULL DEFAULT 0 CHECK (stock >= 0),
+  category TEXT NOT NULL CHECK (category IN ('food', 'electronics', 'clothing'))
+);
+```
+
+**解説：** `NOT NULL` で必須、`CHECK` で値の範囲やリストを制限、`DEFAULT` でデフォルト値を設定します。category のような固定値リストは `CHECK (category IN (...))` で表現できます（ENUM型でも書けますが、値の追加が ALTER TABLE 不要な CHECK の方が変更しやすい場合があります）。
+
+</details>
+
+### 問題2: 制約違反のエラー解読
+
+> 参照：[8. 制約違反エラーの読み方](#8-制約違反エラーの読み方)
+
+以下のエラーメッセージが出ました。何が問題で、どう修正すればよいですか？
+
+```
+ERROR:  new row for relation "products" violates check constraint "products_price_check"
+DETAIL:  Failing row contains (1, 'テスト商品', -500, 0, 'food').
+```
+
+<details>
+<summary>回答を見る</summary>
+
+**問題：** `price` に `-500` という負の値を挿入しようとしたため、`CHECK (price >= 0)` 制約に違反しています。
+
+**修正方法：**
+```sql
+-- 正しい price（0以上）を指定する
+INSERT INTO products (name, price, stock, category)
+VALUES ('テスト商品', 500, 0, 'food');
+```
+
+**解説：** エラーメッセージには制約名（`products_price_check`）と違反した行のデータが含まれます。制約名から「products テーブルの price カラムの CHECK 制約」と特定できます。制約名を自分で付けておくとエラーが読みやすくなります（例: `CONSTRAINT chk_price_positive CHECK (price >= 0)`）。
+
+</details>
+
+### 問題3: 外部キーの ON DELETE 動作
+
+> 参照：[6. 外部キー制約](#6-外部キー制約参照整合性ddl構文)
+
+`users` と `posts` テーブルがあります（users.id を posts.user_id が参照）。以下の要件それぞれで適切な `ON DELETE` を選んでください。
+
+1. ユーザーを削除したら投稿も一緒に削除したい
+2. 投稿がある限りユーザーを削除できないようにしたい
+3. ユーザーを削除しても投稿は残し、作者不明として扱いたい
+
+<details>
+<summary>回答を見る</summary>
+
+| 要件 | ON DELETE | 説明 |
+|------|-----------|------|
+| 1 | `CASCADE` | 親（users）削除時に子（posts）も自動削除 |
+| 2 | `RESTRICT` または `NO ACTION` | 子が存在する限り親を削除できない |
+| 3 | `SET NULL` | 親削除時に子の外部キーを NULL にする（posts.user_id は NULL 許容が必要） |
+
+**解説：** デフォルト（指定なし）は `NO ACTION` で `RESTRICT` と同じ動作です。要件によって選択し、チーム内で統一しておくことが重要です。後から変更するのはマイグレーションが必要で影響範囲が大きいため、設計時に慎重に決めましょう。
+
+</details>

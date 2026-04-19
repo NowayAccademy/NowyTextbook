@@ -624,41 +624,41 @@ SHOW log_statement;  -- 'none', 'ddl', 'mod', 'all'
 
 ---
 
-## 11. PRレビューのチェックポイント
+## 11. ポイント
 
 シニアエンジニアがセキュリティ関連のコードレビューで確認するポイントをまとめます。
 
 ### 権限設計
 
-- [ ] **アプリのDBユーザーがSUPERUSERになっていないか**
+- **アプリのDBユーザーがSUPERUSERになっていないか**
   - `.env` や接続設定で `postgres` ユーザーを直接使っていないか
-- [ ] **アプリユーザーに不要なDDL権限（CREATE/DROP/ALTER）が付いていないか**
+- **アプリユーザーに不要なDDL権限（CREATE/DROP/ALTER）が付いていないか**
   - マイグレーション専用ユーザーと通常アプリユーザーが分かれているか
-- [ ] **環境ごとに異なるユーザー・パスワードが設定されているか**
+- **環境ごとに異なるユーザー・パスワードが設定されているか**
   - 開発・ステージング・本番で同じクレデンシャルを使い回していないか
-- [ ] **退職・異動したメンバーのアクセス権が削除されているか**
+- **退職・異動したメンバーのアクセス権が削除されているか**
   - 定期的な権限棚卸しの仕組みがあるか
 
 ### SQLインジェクション対策
 
-- [ ] **ユーザー入力をSQL文字列に直接連結していないか**
+- **ユーザー入力をSQL文字列に直接連結していないか**
   - `f"... WHERE id = {user_id}"` のような文字列フォーマットを使っていないか
-- [ ] **ORDER BY句やテーブル名に外部入力を使う場合、ホワイトリスト検証があるか**
+- **ORDER BY句やテーブル名に外部入力を使う場合、ホワイトリスト検証があるか**
   - プリペアドステートメントはORDER BYの列名には対応できない
-- [ ] **ORMを使っている場合でも、生SQLを書く箇所がないか確認する**
+- **ORMを使っている場合でも、生SQLを書く箇所がないか確認する**
   - ORMのraw queryメソッドを使う際は特に注意
 
 ### 認証情報の管理
 
-- [ ] **`.env` や設定ファイルが `.gitignore` に追加されているか**
-- [ ] **接続文字列・パスワードがコード内やログにハードコードされていないか**
-- [ ] **本番のDBへの接続はVPN経由または特定IPからのみ許可されているか（pg_hba.conf）**
+- **`.env` や設定ファイルが `.gitignore` に追加されているか**
+- **接続文字列・パスワードがコード内やログにハードコードされていないか**
+- **本番のDBへの接続はVPN経由または特定IPからのみ許可されているか（pg_hba.conf）**
 
 ### データ保護
 
-- [ ] **開発・テスト環境に本番データをそのままコピーしていないか**
+- **開発・テスト環境に本番データをそのままコピーしていないか**
   - マスキングスクリプトが用意されているか
-- [ ] **ログレベルの設定が本番環境に適切か（個人情報がログに出ていないか）**
+- **ログレベルの設定が本番環境に適切か（個人情報がログに出ていないか）**
 
 ---
 
@@ -675,3 +675,132 @@ SHOW log_statement;  -- 'none', 'ddl', 'mod', 'all'
 | マスキング | 本番データは開発環境に持ち込む前に必ずマスキング |
 | pg_hba.conf | IPアドレスとユーザーで接続を制御。trustは本番禁止 |
 | よくあるミス | デフォルトパスワード・全IP許可・文字列連結SQL・不要ユーザー放置 |
+
+---
+
+## 練習問題
+
+### 問題1: ユーザーと権限の設計
+
+> 参照：[1. PostgreSQLのロールとユーザーの概念](#1-postgresqlのロールroleとユーザーの概念) ・ [3. 最小権限の原則](#3-最小権限の原則)
+
+Webアプリケーションのデータベースユーザーを設計してください。以下の役割に対して最小権限の原則で権限を付与してください。
+
+- `app_user`：アプリケーションが日常使いするユーザー（SELECT/INSERT/UPDATE/DELETE）
+- `readonly_user`：分析・レポート用のユーザー（SELECT のみ）
+- `migration_user`：マイグレーション実行用（DDL を含む全権限）
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+-- ユーザーの作成
+CREATE USER app_user       WITH PASSWORD 'strong_password_1';
+CREATE USER readonly_user  WITH PASSWORD 'strong_password_2';
+CREATE USER migration_user WITH PASSWORD 'strong_password_3';
+
+-- app_user: DML のみ
+GRANT CONNECT ON DATABASE myapp_db TO app_user;
+GRANT USAGE ON SCHEMA public TO app_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO app_user;
+
+-- readonly_user: SELECT のみ
+GRANT CONNECT ON DATABASE myapp_db TO readonly_user;
+GRANT USAGE ON SCHEMA public TO readonly_user;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO readonly_user;
+
+-- migration_user: フルアクセス（マイグレーション実行時のみ使用）
+GRANT ALL PRIVILEGES ON DATABASE myapp_db TO migration_user;
+```
+
+**解説：** 最小権限の原則（Principle of Least Privilege）に従い、各ユーザーに必要最小限の権限だけを付与します。アプリケーションが `migration_user` で動いていると、SQLインジェクションで DROP TABLE が実行されるリスクがあります。`migration_user` はデプロイ時のみ使用し、通常は `app_user` で動かします。
+
+</details>
+
+### 問題2: SQLインジェクションの防止
+
+> 参照：[5. SQLインジェクションとは](#5-sqlインジェクションとは攻撃例で説明) ・ [6. プリペアドステートメントによる対策](#6-プリペアドステートメントによる対策)
+
+以下のコード（Node.js 擬似コード）にSQLインジェクションの脆弱性があります。問題点を説明し、安全な書き方に修正してください。
+
+```javascript
+// 脆弱なコード
+const userId = req.params.id;
+const query = `SELECT * FROM users WHERE id = ${userId}`;
+db.query(query);
+```
+
+<details>
+<summary>回答を見る</summary>
+
+**問題点：**
+ユーザー入力をそのまま文字列結合するため、`userId` に `1; DROP TABLE users; --` のような悪意ある文字列が入ると全テーブルが削除される可能性があります。
+
+**安全な書き方（プリペアドステートメント）：**
+
+```javascript
+// 安全なコード：パラメータを分離する
+const userId = req.params.id;
+const query = 'SELECT * FROM users WHERE id = $1';
+db.query(query, [userId]);
+```
+
+**SQL側で確認：**
+```sql
+-- PostgreSQL のPREPARE文
+PREPARE get_user(bigint) AS
+  SELECT * FROM users WHERE id = $1;
+
+EXECUTE get_user(42);
+```
+
+**解説：** プリペアドステートメント（パラメータ化クエリ）はSQLと値を分離して送るため、値がどんな文字列でもSQLとして解釈されません。ORMのクエリビルダーも内部でこの仕組みを使っています。文字列結合でSQLを組み立てることは絶対に避けてください。
+
+</details>
+
+### 問題3: 本番データのマスキング
+
+> 参照：[8. 本番データのマスキング](#8-本番データのマスキング)
+
+開発環境の構築に本番データを使いたいですが、個人情報が含まれています。マスキングの方針と具体的なSQLを示してください。
+
+対象テーブル：`users`（id, name, email, phone）
+
+<details>
+<summary>回答を見る</summary>
+
+**マスキング方針：**
+- `id`：変更しない（外部キー参照が壊れないよう）
+- `name`：ランダムな仮名に置き換え
+- `email`：`user_{id}@example.com` の形式に変換
+- `phone`：固定のダミー値に置き換え
+
+**マスキング用SQL：**
+
+```sql
+-- 開発環境のDBにコピー後、個人情報を上書き
+UPDATE users SET
+  name  = 'テストユーザー' || id::TEXT,
+  email = 'user_' || id::TEXT || '@example.com',
+  phone = '000-0000-0000';
+```
+
+**本番→開発への安全なフロー：**
+```bash
+# 1. 本番からダンプ
+pg_dump -h prod-host -U admin myapp_db > prod_backup.sql
+
+# 2. 開発DBに復元
+psql -h localhost -U admin myapp_dev < prod_backup.sql
+
+# 3. マスキング実行（復元直後に必ず実行）
+psql -h localhost -U admin -d myapp_dev -f masking.sql
+
+# 4. 確認
+psql -h localhost -U admin -d myapp_dev -c "SELECT email FROM users LIMIT 5;"
+```
+
+**解説：** 本番データを開発環境に持ち込む前のマスキングは義務です。個人情報保護法・GDPRなどの法規制への対応だけでなく、開発者の端末から本番の個人情報が漏洩するリスクを防ぎます。マスキングスクリプトは必ずバージョン管理し、データコピーのたびに自動で実行されるようCI/CDに組み込むことが理想です。
+
+</details>

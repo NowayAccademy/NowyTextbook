@@ -655,31 +655,31 @@ ALTER TABLE users DROP COLUMN IF EXISTS profile_url;
 
 ---
 
-## 12. PRレビューのチェックポイント
+## 12. ポイント
 
 マイグレーションや運用スクリプトを含む PR をレビューする際、以下の観点を確認してください。現場でよく指摘されるポイントです。
 
 ### マイグレーションファイルのチェック
 
-- [ ] ファイル名の命名規則（`V{バージョン}__{説明}.sql`）に従っているか
-- [ ] 既存のマイグレーションファイルを修正していないか（変更禁止）
-- [ ] `CREATE TABLE`・`CREATE INDEX` に `IF NOT EXISTS` が付いているか（冪等性）
-- [ ] ロールバック用のSQLがコメントまたは down ファイルとして準備されているか
-- [ ] 大量データに対する `ALTER TABLE` を含む場合、実行時間の見積もりがあるか
-- [ ] インデックス追加は `CONCURRENTLY` を使っているか（本番ロック回避）
-- [ ] `DROP TABLE` / `TRUNCATE` を含む場合、意図が明確か（誤削除のリスク）
+- ファイル名の命名規則（`V{バージョン}__{説明}.sql`）に従っているか
+- 既存のマイグレーションファイルを修正していないか（変更禁止）
+- `CREATE TABLE`・`CREATE INDEX` に `IF NOT EXISTS` が付いているか（冪等性）
+- ロールバック用のSQLがコメントまたは down ファイルとして準備されているか
+- 大量データに対する `ALTER TABLE` を含む場合、実行時間の見積もりがあるか
+- インデックス追加は `CONCURRENTLY` を使っているか（本番ロック回避）
+- `DROP TABLE` / `TRUNCATE` を含む場合、意図が明確か（誤削除のリスク）
 
 ### バックアップ・運用スクリプトのチェック
 
-- [ ] 接続情報（ホスト・パスワード）がハードコードされていないか
-- [ ] バックアップ後のリストアテスト手順が含まれているか
-- [ ] バックアップファイルの保存先・保持期間が定義されているか
-- [ ] cronジョブのエラーをメールや監視ツールに通知する設定があるか
+- 接続情報（ホスト・パスワード）がハードコードされていないか
+- バックアップ後のリストアテスト手順が含まれているか
+- バックアップファイルの保存先・保持期間が定義されているか
+- cronジョブのエラーをメールや監視ツールに通知する設定があるか
 
 ### VACUUM 設定変更のチェック
 
-- [ ] テーブルごとに `autovacuum_vacuum_scale_factor` を変更する場合、意図が説明されているか
-- [ ] `VACUUM FULL` の実行タイミングがメンテナンスウィンドウ内か
+- テーブルごとに `autovacuum_vacuum_scale_factor` を変更する場合、意図が説明されているか
+- `VACUUM FULL` の実行タイミングがメンテナンスウィンドウ内か
 
 ---
 
@@ -700,3 +700,112 @@ ALTER TABLE users DROP COLUMN IF EXISTS profile_url;
 | 命名規則 | マイグレーションファイルの命名はチームで統一。一度コミットしたら変更禁止 |
 | 接続情報 | 環境変数/.envで管理。ソースコードに直書き禁止 |
 | よくある運用ミス | バックアップなし・VACUUM未実行・接続枯渇・ロールバック未準備 |
+
+---
+
+## 練習問題
+
+### 問題1: マイグレーションファイルの作成
+
+> 参照：[7. マイグレーション戦略](#7-マイグレーション戦略本番への安全な適用)
+
+`articles` テーブルに `view_count INTEGER NOT NULL DEFAULT 0` カラムを追加するマイグレーションファイルを作成してください。ファイル名の命名規則も含めて示してください。
+
+<details>
+<summary>回答を見る</summary>
+
+**ファイル名：**
+```
+20240419120000_add_view_count_to_articles.sql
+```
+
+**マイグレーション内容：**
+```sql
+-- up（適用）
+ALTER TABLE articles ADD COLUMN view_count INTEGER NOT NULL DEFAULT 0;
+
+-- down（ロールバック）
+ALTER TABLE articles DROP COLUMN view_count;
+```
+
+**解説：** マイグレーションファイル名にはタイムスタンプ（YYYYMMDDHHmmss）をプレフィックスに付けることで実行順序を保証します。up（適用）とdown（ロールバック）をセットで書くと、問題発生時に安全に元に戻せます。一度コミットしたファイルの内容は変更しないことが鉄則です（新しいファイルで修正する）。
+
+</details>
+
+### 問題2: バックアップの取得と復元
+
+> 参照：[5. バックアップと復元](#5-バックアップpgdumpと復元pgrestore-psql)
+
+PostgreSQL の `pg_dump` を使って `myapp_db` データベースをバックアップし、別のデータベース `myapp_restore` に復元するコマンドを書いてください。
+
+<details>
+<summary>回答を見る</summary>
+
+```bash
+# バックアップ（カスタム形式：圧縮・並列復元が可能）
+pg_dump -h localhost -U app_user -d myapp_db -F c -f myapp_db_20240419.dump
+
+# バックアップ（SQL形式：可読性が高い）
+pg_dump -h localhost -U app_user -d myapp_db > myapp_db_20240419.sql
+
+# 復元先データベースの作成
+createdb -h localhost -U app_user myapp_restore
+
+# カスタム形式からの復元
+pg_restore -h localhost -U app_user -d myapp_restore myapp_db_20240419.dump
+
+# SQL形式からの復元
+psql -h localhost -U app_user -d myapp_restore < myapp_db_20240419.sql
+```
+
+**解説：** `pg_dump` はデータベースの論理バックアップを取得します。`-F c`（カスタム形式）は圧縮され、`pg_restore` の `--jobs` オプションで並列復元が可能です。本番環境では定期的なバックアップと復元テスト（バックアップから実際に復元できるか確認）が必須です。
+
+</details>
+
+### 問題3: 接続数の問題
+
+> 参照：[9. 接続情報の管理](#9-接続情報の管理環境変数・env) ・ [10. よくある運用ミス](#10-よくある運用ミス)
+
+本番環境で以下のエラーが頻発しています。原因と対処法を答えてください。
+
+```
+ERROR: remaining connection slots are reserved for non-replication superuser connections
+```
+
+<details>
+<summary>回答を見る</summary>
+
+**原因：**
+PostgreSQL の最大接続数（`max_connections`、デフォルト100）に達した状態です。アプリケーションが接続を適切に解放していないか、アクセスが急増している可能性があります。
+
+**対処法：**
+
+1. **コネクションプールの導入（最も重要）**
+   ```
+   PgBouncer などのコネクションプーラーを導入する
+   アプリ → PgBouncer（少数の接続を管理） → PostgreSQL
+   ```
+
+2. **現在の接続数を確認**
+   ```sql
+   SELECT count(*), state, application_name
+   FROM pg_stat_activity
+   GROUP BY state, application_name;
+   ```
+
+3. **アイドル接続の強制切断（緊急対処）**
+   ```sql
+   SELECT pg_terminate_backend(pid)
+   FROM pg_stat_activity
+   WHERE state = 'idle'
+     AND query_start < NOW() - INTERVAL '10 minutes';
+   ```
+
+4. **max_connections の増加（PostgreSQL.conf）**
+   ```
+   max_connections = 200  # 増やすとメモリ消費も増える
+   ```
+
+**解説：** コネクションプールなしでアプリが直接 PostgreSQL に接続する設計では、アクセス増加時に接続数が枯渇します。本番環境では必ず PgBouncer や pgpool-II などのプールを入れることが標準です。
+
+</details>

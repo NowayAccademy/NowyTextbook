@@ -1,633 +1,742 @@
-# トランザクションとページング
-BEGIN/COMMIT/ROLLBACKによるトランザクション制御と、OFFSETに頼らないページング手法を学びます
+# ウィンドウ関数
+OVER句・ROW_NUMBER・RANK・LAG/LEAD・集計OVERでデータを分析します
 
 ## 本章の目標
 
 本章では以下を目標にして学習します。
 
-- BEGIN / COMMIT / ROLLBACK の基本操作ができること
-- SAVEPOINT を使って部分的なロールバックができること
-- PostgreSQL のオートコミットの挙動を理解できること
-- トランザクション内でエラーが起きたときの挙動を理解できること
-- 長時間トランザクションのリスクを説明できること
-- OFFSET ページングの問題点を理解できること
-- カーソルベースページング（キーセットページング）を実装できること
+- ウィンドウ関数とGROUP BYの違いを説明できること
+- PARTITION BY・ORDER BY in OVERを使って分析クエリを書けること
+- ROW_NUMBER・RANK・DENSE_RANKで順位付けができること
+- LAG・LEADで前後の行の値を参照できること
+- SUM/AVG OVERで累計・移動平均を計算できること
+- ROWSフレーム指定で集計範囲を細かく指定できること
 
 ---
 
-## 1. トランザクションとは
+## 1. ウィンドウ関数とは（GROUP BYとの違い）
 
-トランザクションとは、**複数の DML（INSERT/UPDATE/DELETE）操作をひとまとめにする仕組み**です。
+### ウィンドウ関数の概念
 
-### なぜトランザクションが必要か
+**ウィンドウ関数**は、「**各行を残しながら**、その行の周辺（ウィンドウ）の情報を使って計算する」関数です。
 
-銀行振込を例に考えましょう。
-
-```
-Aさんの口座から 1万円を引く
-Bさんの口座に  1万円を足す
-```
-
-この2つの処理は「必ずセットで成功 or セットで失敗」でなければなりません。  
-もし途中でサーバーがクラッシュして「Aさんの口座だけ引かれた」状態になると大問題です。
-
-トランザクションを使えば、途中で失敗しても「最初からなかったこと（ロールバック）」にできます。
+GROUP BYとの最大の違いは**行数が減らない**ことです：
+- `GROUP BY` → グループごとに1行に集約される（行が減る）
+- `ウィンドウ関数` → すべての行が残り、各行に集計結果が付け加わる
 
 ```sql
--- 銀行振込のイメージ
-BEGIN;
-
-UPDATE accounts SET balance = balance - 10000 WHERE id = 1;  -- A から引く
-UPDATE accounts SET balance = balance + 10000 WHERE id = 2;  -- B に足す
-
-COMMIT;   -- 両方成功したら確定
-```
-
-もし2行目でエラーが起きても、ROLLBACK すれば1行目の UPDATE もなかったことになります。
-
-### ACID 特性
-
-トランザクションには4つの性質があります。
-
-| 特性 | 意味 |
-|------|------|
-| 原子性（Atomicity） | 全部成功 or 全部失敗。中途半端な状態にならない |
-| 一貫性（Consistency） | トランザクション前後でデータの整合性が保たれる |
-| 分離性（Isolation） | 複数のトランザクションが互いに干渉しない |
-| 永続性（Durability） | COMMIT したデータはクラッシュしても失われない |
-
-> **ポイント**  
-> トランザクションは「全部成功するか、全部なかったことにするか」を保証します。  
-> 実務では銀行振込・在庫更新・注文処理など、複数テーブルにまたがる操作で必ず使います。
-
----
-
-## 2. BEGIN / COMMIT の基本
-
-本章で使うサンプルテーブルを用意します。
-
-```sql
-CREATE TABLE accounts (
-    id      SERIAL PRIMARY KEY,
-    name    TEXT NOT NULL,
-    balance INTEGER NOT NULL DEFAULT 0
+-- テーブル準備
+CREATE TABLE sales_data (
+    id          INT PRIMARY KEY,
+    staff_name  TEXT,
+    department  TEXT,
+    sale_amount INT,
+    sale_date   DATE
 );
 
-INSERT INTO accounts (id, name, balance) VALUES
-(1, '田中 太郎', 50000),
-(2, '鈴木 花子', 30000),
-(3, '山田 次郎', 10000);
-```
-
-### 基本的なトランザクション
-
-```sql
--- トランザクション開始
-BEGIN;
-
--- DML 操作
-UPDATE accounts SET balance = balance - 10000 WHERE id = 1;
-UPDATE accounts SET balance = balance + 10000 WHERE id = 2;
-
--- 内容を確認
-SELECT id, name, balance FROM accounts WHERE id IN (1, 2);
--- id=1: 40000, id=2: 40000 と表示される（まだコミットしていない）
-
--- 問題なければ確定
-COMMIT;
-
--- コミット後に確認
-SELECT id, name, balance FROM accounts WHERE id IN (1, 2);
--- コミットされたので同じ結果が返る
-```
-
-> **ポイント**  
-> BEGIN ～ COMMIT の間はどんなに SELECT しても、他のセッションからは変更前の値が見えます。  
-> これが「分離性」です。自分のセッションでは変更後の値が見えますが、COMMIT するまで  
-> 他のセッションには反映されません。
-
----
-
-## 3. ROLLBACK（取り消し）
-
-COMMIT の代わりに ROLLBACK を使うと、BEGIN 以降のすべての変更が取り消されます。
-
-```sql
-BEGIN;
-
-UPDATE accounts SET balance = balance - 10000 WHERE id = 1;
-UPDATE accounts SET balance = balance + 10000 WHERE id = 2;
-
--- やっぱりやめる
-ROLLBACK;
-
--- ROLLBACK 後の確認
-SELECT id, name, balance FROM accounts WHERE id IN (1, 2);
--- 元の値 (50000, 30000) のまま
-```
-
-```sql
--- 確認してから判断するパターン
-BEGIN;
-
-DELETE FROM accounts WHERE balance < 5000;
--- DELETE 1 （山田次郎が削除対象）
-
-SELECT COUNT(*) FROM accounts;
--- 2 になっている
-
--- 削除してよいか確認後に決定
--- よければ：COMMIT;
--- ダメなら：ROLLBACK;
-ROLLBACK;   -- 今回はやめる
-```
-
-> **ポイント**  
-> 本番環境での UPDATE / DELETE は必ず `BEGIN` から始めましょう。  
-> 実行後に結果を SELECT で確認し、問題なければ COMMIT、おかしければ ROLLBACK できます。  
-> これが「事故ゼロ」に向けた最も大切な習慣です。
-
----
-
-## 4. SAVEPOINT / ROLLBACK TO SAVEPOINT
-
-トランザクション全体ではなく、**途中の特定の地点まで戻す** ことができます。
-
-```sql
-BEGIN;
-
--- 最初の操作
-UPDATE accounts SET balance = balance - 5000 WHERE id = 1;
--- id=1: 45000
-
--- セーブポイントを作成
-SAVEPOINT before_transfer;
-
--- 追加の操作
-UPDATE accounts SET balance = balance + 5000 WHERE id = 2;
--- id=2: 35000
-
--- ここまでの確認
-SELECT id, name, balance FROM accounts;
-
--- この UPDATE だけを取り消したい
-ROLLBACK TO SAVEPOINT before_transfer;
--- id=2 の変更が取り消される（id=1: 45000, id=2: 30000 に戻る）
-
--- 別の操作を試みる
-UPDATE accounts SET balance = balance + 5000 WHERE id = 3;
--- id=3: 15000
-
--- 最終確認後にコミット
-COMMIT;
--- id=1: 45000, id=2: 30000, id=3: 15000
-```
-
-### SAVEPOINT の削除
-
-```sql
--- SAVEPOINT が不要になったら削除できる
-RELEASE SAVEPOINT before_transfer;
-```
-
-> **ポイント**  
-> SAVEPOINT は「複数ステップの処理の途中でやり直しが発生するかもしれない」場合に使います。  
-> 実務では長いバッチ処理で「ここまでは確実にコミットしたい」という場面で活用します。
-
----
-
-## 5. オートコミットの挙動（PostgreSQL のデフォルト）
-
-PostgreSQL では、BEGIN なしで SQL を実行すると **自動的にコミット（オートコミット）** されます。
-
-```sql
--- BEGIN なし → 自動コミット（取り消し不可）
-UPDATE accounts SET balance = balance - 10000 WHERE id = 1;
--- 即座にコミットされる。ROLLBACK できない！
-```
-
-```sql
--- psql などのクライアントでオートコミットを無効にする
-\set AUTOCOMMIT off   -- psql の場合
-
--- アプリケーションコードでは接続時の設定で制御する
-```
-
-> **注意**  
-> psql（コマンドラインツール）では `\set AUTOCOMMIT off` でオートコミットを無効にできますが、  
-> デフォルトはオンです。本番環境で直接 psql で操作するときは特に注意が必要です。  
-> アプリケーションコードでは、ORM やドライバの設定でオートコミットを制御してください。
-
----
-
-## 6. トランザクション内でエラーが起きた場合の挙動
-
-PostgreSQL では、トランザクション内でエラーが発生すると、  
-**そのトランザクションは「エラー状態」になり、COMMIT できなくなります。**
-
-```sql
-BEGIN;
-
-UPDATE accounts SET balance = balance - 10000 WHERE id = 1;
--- 成功
-
-UPDATE accounts SET balance = balance + 10000 WHERE id = 999;
--- id=999 は存在するが、外部キー制約違反などのエラーが発生したとする
--- ERROR: ...
-
--- この時点でトランザクションはエラー状態
-UPDATE accounts SET balance = 0 WHERE id = 2;
--- ERROR: current transaction is aborted, commands ignored until end of transaction block
-
-COMMIT;
--- ROLLBACK が実行されたのと同じ扱い（変更はすべて取り消し）
-```
-
-エラー状態から回復するには ROLLBACK が必要です。
-
-```sql
-BEGIN;
-
-UPDATE accounts SET balance = balance - 10000 WHERE id = 1;
-
--- エラーが発生
-UPDATE accounts SET balance = balance + 10000 WHERE id = 999;
--- ERROR: ...
-
--- エラー状態から回復
-ROLLBACK;
-
--- 改めて正しいクエリで BEGIN から始める
-BEGIN;
-UPDATE accounts SET balance = balance - 10000 WHERE id = 1;
-UPDATE accounts SET balance = balance + 10000 WHERE id = 2;
-COMMIT;
-```
-
-> **注意**  
-> エラーが発生してもそのまま COMMIT しようとしても、PostgreSQL は自動的に ROLLBACK します。  
-> エラー後は必ず ROLLBACK してから、正しい処理を BEGIN から書き直しましょう。
-
----
-
-## 7. 長時間トランザクションのリスク
-
-トランザクションを長時間オープンにしたままにすると、様々な問題が起きます。
-
-### ロック保持の問題
-
-```sql
-BEGIN;
-
--- この UPDATE は accounts テーブルの id=1 の行をロックする
-UPDATE accounts SET balance = balance - 10000 WHERE id = 1;
-
--- ここで作業を止める（COMMIT も ROLLBACK もしない）
--- → id=1 の行は他のセッションから UPDATE できない状態になる！
-```
-
-他のセッションが `UPDATE accounts WHERE id = 1` しようとすると、  
-このトランザクションが終わるまでずっと待ち続けます（デッドロックの原因にも）。
-
-### VACUUM の妨害
-
-PostgreSQL では不要になった行を VACUUM という処理が掃除しますが、  
-長時間トランザクションがあると「その時点以降の行は不要と判断できない」ため、  
-VACUUM が進まずテーブルが肥大化します。
-
-```sql
--- 長時間実行中のトランザクションを確認する
+INSERT INTO sales_data VALUES
+    (1,  '田中', '東京', 50000, '2024-01-10'),
+    (2,  '鈴木', '東京', 80000, '2024-01-15'),
+    (3,  '佐藤', '大阪', 60000, '2024-01-20'),
+    (4,  '伊藤', '大阪', 45000, '2024-01-25'),
+    (5,  '田中', '東京', 70000, '2024-02-05'),
+    (6,  '鈴木', '東京', 55000, '2024-02-10'),
+    (7,  '佐藤', '大阪', 90000, '2024-02-15'),
+    (8,  '伊藤', '大阪', 30000, '2024-02-20'),
+    (9,  '田中', '東京', 40000, '2024-03-05'),
+    (10, '鈴木', '東京', 95000, '2024-03-10');
+
+-- GROUP BY: 部署ごとに集約（行が減る）
+SELECT department, SUM(sale_amount) AS total
+FROM sales_data
+GROUP BY department;
+
+-- ウィンドウ関数: 各行が残り、合計が付く（行が減らない）
 SELECT
-    pid,
-    now() - pg_stat_activity.xact_start AS duration,
-    query,
-    state
-FROM pg_stat_activity
-WHERE (now() - pg_stat_activity.xact_start) > INTERVAL '5 minutes'
-  AND state != 'idle';
+    staff_name,
+    department,
+    sale_amount,
+    SUM(sale_amount) OVER (PARTITION BY department) AS dept_total
+FROM sales_data;
 ```
 
-> **注意**  
-> アプリケーションで DB 接続をオープンにしたまま外部 API コールや重い処理を挟むのは  
-> 長時間トランザクションの典型的な原因です。  
-> DB 操作の直前に BEGIN し、できるだけ短時間で COMMIT するよう設計しましょう。
+> **ポイント**  
+> ウィンドウ関数はSELECT句の中に `関数名() OVER (...)` の形で書きます。OVER句が「どの範囲（ウィンドウ）で計算するか」を指定します。
+
+---
+
+## 2. OVER句の基本（パーティションとオーダー）
+
+### OVER句の構文
+
+```sql
+関数名() OVER (
+    PARTITION BY 列名    -- グループ分け（省略可）
+    ORDER BY 列名        -- ウィンドウ内の並び順（省略可）
+    ROWS BETWEEN ...     -- フレーム範囲（省略可）
+)
+```
+
+```sql
+-- OVER()だけ（全行を対象）
+SELECT
+    staff_name,
+    sale_amount,
+    SUM(sale_amount) OVER () AS grand_total  -- 全行の合計
+FROM sales_data;
+
+-- PARTITION BY だけ（グループ内合計）
+SELECT
+    staff_name,
+    department,
+    sale_amount,
+    SUM(sale_amount) OVER (PARTITION BY department) AS dept_total
+FROM sales_data;
+
+-- ORDER BY だけ（累計）
+SELECT
+    id,
+    sale_date,
+    sale_amount,
+    SUM(sale_amount) OVER (ORDER BY sale_date) AS running_total
+FROM sales_data;
+```
+
+---
+
+## 3. PARTITION BY（グループ分け、GROUP BYとの違い）
+
+### PARTITION BYの働き
+
+`PARTITION BY` はウィンドウ関数のグループ分けを指定します。GROUP BYとは異なり、行数は減りません。
+
+```sql
+-- 各行の売上と、その部署の平均売上を並べて表示
+SELECT
+    staff_name,
+    department,
+    sale_amount,
+    AVG(sale_amount) OVER (PARTITION BY department) AS dept_avg,
+    sale_amount - AVG(sale_amount) OVER (PARTITION BY department) AS diff_from_avg
+FROM sales_data
+ORDER BY department, sale_amount DESC;
+```
+
+**結果イメージ**
+
+| staff_name | department | sale_amount | dept_avg | diff_from_avg |
+|------------|-----------|-------------|---------|----------------|
+| 鈴木       | 東京      | 95000       | 66000   | +29000         |
+| 鈴木       | 東京      | 80000       | 66000   | +14000         |
+| 田中       | 東京      | 70000       | 66000   | +4000          |
+| 田中       | 東京      | 50000       | 66000   | -16000         |
+| 田中       | 東京      | 40000       | 66000   | -26000         |
+| 鈴木       | 東京      | 55000       | 66000   | -11000         |
+
+> **ポイント**  
+> `PARTITION BY department` は「部署ごとに別々にウィンドウを作る」指定です。東京チームの中だけで計算、大阪チームの中だけで計算という具合に、グループを分けて計算します。
+
+---
+
+## 4. ORDER BY in OVER（ウィンドウ内の順序）
+
+### ウィンドウ内で順序が重要な計算
+
+```sql
+-- 日付順で各スタッフの売上を並べたときの累計（スタッフ別）
+SELECT
+    staff_name,
+    sale_date,
+    sale_amount,
+    SUM(sale_amount) OVER (
+        PARTITION BY staff_name
+        ORDER BY sale_date
+    ) AS running_total_per_staff
+FROM sales_data
+ORDER BY staff_name, sale_date;
+```
+
+> **ポイント**  
+> OVER句内の `ORDER BY` はウィンドウ内での並び順を指定します。クエリ全体のORDER BYとは別物です。ウィンドウ内のORDER BYを省略すると、`SUM` や `AVG` などは全行を対象に計算されます。
+
+---
+
+## 5. ROW_NUMBER（一意な連番）
+
+### ROW_NUMBERの使い方
+
+`ROW_NUMBER()` は各行に重複なしの連番を振ります。同じ値でも別々の番号が付くのが特徴です。
+
+```sql
+-- 全行に連番
+SELECT
+    ROW_NUMBER() OVER (ORDER BY sale_amount DESC) AS row_num,
+    staff_name,
+    sale_amount
+FROM sales_data;
+
+-- 部署ごとに連番を振り直す
+SELECT
+    staff_name,
+    department,
+    sale_amount,
+    ROW_NUMBER() OVER (
+        PARTITION BY department
+        ORDER BY sale_amount DESC
+    ) AS rank_in_dept
+FROM sales_data
+ORDER BY department, rank_in_dept;
+```
+
+### ROW_NUMBERで上位N件を取得する
+
+```sql
+-- 部署ごとに売上上位2件を取得
+WITH ranked AS (
+    SELECT
+        staff_name,
+        department,
+        sale_amount,
+        ROW_NUMBER() OVER (
+            PARTITION BY department
+            ORDER BY sale_amount DESC
+        ) AS rn
+    FROM sales_data
+)
+SELECT staff_name, department, sale_amount
+FROM ranked
+WHERE rn <= 2
+ORDER BY department, rn;
+```
+
+> **ポイント**  
+> ウィンドウ関数はWHERE句で直接フィルタできません。サブクエリやCTEでウィンドウ関数を実行してから、外側のWHEREで絞り込みます。
 
 > **現場メモ**  
-> 長時間トランザクションによる障害は、本番で突然「DB全体が遅くなった」という形で現れることが多く、原因の特定に時間がかかります。筆者が関わったインシデントでは、夜間バッチが大量データを1トランザクションで処理していたため、バッチ実行中はユーザー向けのAPIがすべてロック待ちになっていました。`pg_stat_activity` で長時間実行中のトランザクションを確認したとき「なぜこのクエリが1時間以上実行されているのか」と初めて気づいた、という経験があります。本番DBでは定期的に `SELECT pid, now() - xact_start AS duration, query FROM pg_stat_activity WHERE state != 'idle'` を確認する監視を入れることを推奨します。また、トランザクション内でメール送信やSlack通知などの外部API呼び出しをしているコードは即座に修正対象です。
+> `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)` + CTEで上位N件を取る、というパターンは実務で非常によく使います。「カテゴリごとに売上トップ3の商品を取り出す」「ユーザーごとに最新のログだけ取る」などの要件は、GROUP BY + サブクエリで書くと複雑になりますが、ROW_NUMBERを使うとシンプルに表現できます。筆者が初めてこのパターンを覚えたとき「こんな書き方があったのか」と感動しました。特に「各グループの最新レコードを1件だけ取る」（ROW_NUMBER = 1でフィルタ）は頻出パターンとして覚えておくと面接でも役立ちます。
 
 ---
 
-## 8. OFFSET ページングの問題
+## 6. RANK（同率順位あり、飛び番あり）
 
-Web アプリでよく見る「前の10件 / 次の10件」のようなページング。  
-単純な実装として OFFSET + LIMIT がありますが、大量データでは問題が出ます。
+### RANKの特徴
 
-### OFFSET ページングの実装
-
-```sql
--- ページ1（1〜10件目）
-SELECT id, name, price FROM products ORDER BY id LIMIT 10 OFFSET 0;
-
--- ページ2（11〜20件目）
-SELECT id, name, price FROM products ORDER BY id LIMIT 10 OFFSET 10;
-
--- ページ100（991〜1000件目）
-SELECT id, name, price FROM products ORDER BY id LIMIT 10 OFFSET 990;
-
--- ページ10000（99991〜100000件目）
-SELECT id, name, price FROM products ORDER BY id LIMIT 10 OFFSET 99990;
-```
-
-### OFFSET の問題点
-
-**1. 大きな OFFSET は遅い**
+`RANK()` は同じ値に同じ順位を付け、次の順位を飛ばします（1, 1, 3, 4 のように）。
 
 ```sql
--- これは99990行を読み飛ばしてから10行を返す
--- DB は最初の100000行をスキャンしてから10行を返す → 非常に遅い
-SELECT id, name, price FROM products ORDER BY id LIMIT 10 OFFSET 99990;
-```
-
-OFFSET 値が大きくなるほどスキャン行数が増え、指数的に遅くなります。
-
-```
-OFFSET 0    → 10行スキャン
-OFFSET 100  → 110行スキャン
-OFFSET 1000 → 1010行スキャン
-OFFSET 10000 → 10010行スキャン  ← ここから急激に遅くなる
-```
-
-**2. ページをめくる間にデータが変わるとズレる**
-
-```
-ページ1（1〜10件）を見ている間に、id=3 の行が削除される
-↓
-ページ2（OFFSET 10）に移動すると、元の11件目が10件目にずれる
-→ 10件目のデータがスキップされて表示されない！
-```
-
-> **ポイント**  
-> OFFSET ページングは「ページ数が少ない」「データ量が少ない」場合は問題ありません。  
-> 数百万件のデータや「次のページ」が無限にある SNS のような UI では、  
-> カーソルベースページングを使いましょう。
-
----
-
-## 9. カーソルベースページング（キーセットページング）の概念
-
-カーソルベースページング（キーセットページング）は、  
-「前のページの最後のアイテムの値」を次のページ取得の条件に使う方法です。
-
-### 基本的な考え方
-
-```
-ページ1：id が小さい順に 10件取得 → 最後の id は 10
-ページ2：id > 10 という条件で 10件取得 → 最後の id は 20
-ページ3：id > 20 という条件で 10件取得 → 最後の id は 30
-```
-
-OFFSET の代わりに「前のページの最後の id」を使って「続き」から取得します。
-
-> **ポイント**  
-> カーソルベースページングのメリット：  
-> - 1ページ目も1000万ページ目も同じ速さで取得できる（インデックスを活用）  
-> - データが追加・削除されても「次のページ」が正確に取れる  
-> 
-> デメリット：  
-> - 「3ページ目に直接ジャンプ」ができない（前から順番にたどる必要がある）  
-> - ページ番号を URL に表示する UI とは相性が悪い
-
----
-
-## 10. カーソルベースページングの実装例
-
-サンプルデータを用意します。
-
-```sql
-CREATE TABLE articles (
-    id           SERIAL PRIMARY KEY,
-    title        TEXT NOT NULL,
-    published_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    author_id    INTEGER NOT NULL
-);
-
--- 大量データを挿入（生成例）
-INSERT INTO articles (title, published_at, author_id)
 SELECT
-    '記事タイトル ' || i,
-    NOW() - (INTERVAL '1 second' * i),
-    (i % 10) + 1
-FROM generate_series(1, 100000) AS i;
+    staff_name,
+    sale_amount,
+    RANK() OVER (ORDER BY sale_amount DESC) AS rank
+FROM sales_data
+ORDER BY rank;
 ```
 
-### id 基準のカーソルページング
+| staff_name | sale_amount | rank |
+|------------|-------------|------|
+| 鈴木       | 95000       | 1    |
+| 佐藤       | 90000       | 2    |
+| 鈴木       | 80000       | 3    |
+| 田中       | 70000       | 4    |
+| 佐藤       | 60000       | 5    |
+| 鈴木       | 55000       | 6    |
+| 田中       | 50000       | 7    |
+| 伊藤       | 45000       | 8    |
+| 田中       | 40000       | 9    |
+| 伊藤       | 30000       | 10   |
+
+> **ポイント**  
+> `RANK()` は同値の場合に同じ順位を付け、次の順位番号を飛ばします。「1位が2人いたら、次は3位」というスポーツの順位付けと同じ挙動です。
+
+---
+
+## 7. DENSE_RANK（同率順位あり、飛び番なし）
+
+### DENSE_RANKの特徴
+
+`DENSE_RANK()` は同じ値に同じ順位を付けますが、飛び番を作りません（1, 1, 2, 3 のように）。
 
 ```sql
--- ページ1（最初の10件）
-SELECT id, title, published_at
-FROM articles
-ORDER BY id ASC
-LIMIT 10;
--- → 最後の id が 10 だったとする
-
--- ページ2（id > 10 の10件）
-SELECT id, title, published_at
-FROM articles
-WHERE id > 10          -- 前ページの最後の id
-ORDER BY id ASC
-LIMIT 10;
--- → 最後の id が 20 だったとする
-
--- ページ3（id > 20 の10件）
-SELECT id, title, published_at
-FROM articles
-WHERE id > 20
-ORDER BY id ASC
-LIMIT 10;
+-- RANK と DENSE_RANK の違いを比較
+SELECT
+    staff_name,
+    sale_amount,
+    RANK()       OVER (ORDER BY sale_amount DESC) AS rank_num,
+    DENSE_RANK() OVER (ORDER BY sale_amount DESC) AS dense_rank_num,
+    ROW_NUMBER() OVER (ORDER BY sale_amount DESC) AS row_num
+FROM sales_data
+ORDER BY sale_amount DESC;
 ```
 
-アプリケーションコードのイメージ（疑似コード）：
+| 比較項目 | ROW_NUMBER | RANK | DENSE_RANK |
+|----------|------------|------|------------|
+| 同値の扱い | 別の番号 | 同じ番号（飛び番あり） | 同じ番号（飛び番なし） |
+| 例（同値2件後） | 1, 2, 3 | 1, 1, 3 | 1, 1, 2 |
+| 用途 | ページネーション・重複なし連番 | スポーツ順位 | カテゴリ分類・層別 |
+
+> **ポイント**  
+> どれを使うか迷ったら：重複なし連番 → `ROW_NUMBER`、同率があるスポーツ順位 → `RANK`、飛び番なしのグループ分け → `DENSE_RANK` と覚えましょう。
+
+---
+
+## 8. LAG（前の行の値を参照）
+
+### LAGで前の行を見る
+
+`LAG()` は現在の行から「N行前の値」を取得します。前月比較や前日比較によく使われます。
 
 ```sql
--- パラメータ :last_id = 前ページの最後のアイテムの id（初回は 0）
-SELECT id, title, published_at
-FROM articles
-WHERE id > :last_id
-ORDER BY id ASC
-LIMIT :page_size;
+-- 各スタッフの売上と前回売上の比較
+SELECT
+    staff_name,
+    sale_date,
+    sale_amount,
+    LAG(sale_amount, 1) OVER (
+        PARTITION BY staff_name
+        ORDER BY sale_date
+    ) AS prev_amount,
+    sale_amount - LAG(sale_amount, 1) OVER (
+        PARTITION BY staff_name
+        ORDER BY sale_date
+    ) AS change_from_prev
+FROM sales_data
+ORDER BY staff_name, sale_date;
 ```
 
-### 複数列ソートのカーソルページング
+**結果（田中の例）**
 
-id だけでなく、複数列でソートする場合はタプル比較を使います。
+| staff_name | sale_date  | sale_amount | prev_amount | change_from_prev |
+|------------|------------|-------------|-------------|------------------|
+| 田中       | 2024-01-10 | 50000       | NULL        | NULL             |
+| 田中       | 2024-02-05 | 70000       | 50000       | +20000           |
+| 田中       | 2024-03-05 | 40000       | 70000       | -30000           |
 
 ```sql
--- published_at の降順（同時刻の場合は id の降順）でのページング
--- 前ページの最後: published_at = '2024-03-01 12:00:00', id = 500
-
-SELECT id, title, published_at
-FROM articles
-WHERE (published_at, id) < ('2024-03-01 12:00:00', 500)
-ORDER BY published_at DESC, id DESC
-LIMIT 10;
+-- LAGの第3引数でNULLの代替値を指定できる
+SELECT
+    staff_name,
+    sale_date,
+    sale_amount,
+    LAG(sale_amount, 1, 0) OVER (  -- 前行がない場合は0を返す
+        PARTITION BY staff_name
+        ORDER BY sale_date
+    ) AS prev_amount
+FROM sales_data;
 ```
 
 > **ポイント**  
-> タプル比較 `(col1, col2) < (val1, val2)` を使うと、複数列でのカーソルページングが  
-> すっきり書けます。PostgreSQL ではこの構文が使えます。
-
-### 前方向と後方向
-
-```sql
--- 前方向（次のページ）
-SELECT id, title, published_at
-FROM articles
-WHERE id > :last_id
-ORDER BY id ASC
-LIMIT 10;
-
--- 後方向（前のページ）
-SELECT id, title, published_at
-FROM articles
-WHERE id < :first_id
-ORDER BY id DESC
-LIMIT 10;
--- 取得後にアプリ側で順序を反転する
-```
+> `LAG(列名, N, デフォルト値)` の形で使います。Nを省略すると1行前（デフォルト1）。デフォルト値を省略するとNULLが返ります。
 
 ---
 
-## 11. OFFSET とカーソルベースの使い分け基準
+## 9. LEAD（次の行の値を参照）
 
-| 条件 | 推奨手法 |
-|------|---------|
-| 総データ件数が1万件未満 | OFFSET でも問題なし |
-| 管理画面などページ番号ジャンプが必要 | OFFSET |
-| SNS のタイムライン・無限スクロール | カーソルベース |
-| 大量データ（数百万件以上）のページング | カーソルベース |
-| データが頻繁に追加・削除される | カーソルベース（データのズレを防ぐ） |
+### LEADで次の行を見る
+
+`LEAD()` は `LAG()` の逆で、現在の行から「N行後の値」を取得します。
 
 ```sql
--- OFFSET ページングのパフォーマンス確認
-EXPLAIN ANALYZE
-SELECT id, title FROM articles ORDER BY id LIMIT 10 OFFSET 99990;
--- → Seq Scan や大きな rows 数が出れば遅い
-
--- カーソルベースのパフォーマンス確認
-EXPLAIN ANALYZE
-SELECT id, title FROM articles WHERE id > 99990 ORDER BY id LIMIT 10;
--- → Index Scan が使われて rows が少ない
+-- 次回の売上予定との比較
+SELECT
+    staff_name,
+    sale_date,
+    sale_amount,
+    LEAD(sale_amount, 1) OVER (
+        PARTITION BY staff_name
+        ORDER BY sale_date
+    ) AS next_amount,
+    LEAD(sale_date, 1) OVER (
+        PARTITION BY staff_name
+        ORDER BY sale_date
+    ) AS next_sale_date
+FROM sales_data
+ORDER BY staff_name, sale_date;
 ```
 
 > **ポイント**  
-> `EXPLAIN ANALYZE` でクエリの実行計画を確認しましょう。  
-> カーソルベースではインデックス（主キー）を活用できるため、  
-> 何ページ目でも同じ速さで実行できます。
+> `LAG` は過去を見る（前行）、`LEAD` は未来を見る（次行）です。株価チャートの「前日比」や「翌日予測との差」を計算するのによく使われます。
 
 ---
 
-## 12. よくあるミス
+## 10. SUM OVER（累計・移動合計）
 
-### ミス1：BEGIN を忘れてオートコミットで実行する
-
-```sql
--- NG：BEGIN なしで実行するとロールバックできない
-DELETE FROM accounts WHERE balance < 1000;
--- 即座にコミットされた。取り消し不可！
-```
-
-**対処法：** 常に BEGIN から始める癖をつける。
-
-### ミス2：エラー後に ROLLBACK せず次の操作をする
+### 累計の計算
 
 ```sql
-BEGIN;
-UPDATE accounts SET balance = -99999 WHERE id = 1;
--- CHECK 制約違反などでエラーが出たとする
-UPDATE accounts SET balance = balance + 10000 WHERE id = 2;
--- ERROR: current transaction is aborted, commands ignored until end of transaction block
-COMMIT;
--- → 暗黙的に ROLLBACK される
+-- 日付順の売上累計
+SELECT
+    sale_date,
+    sale_amount,
+    SUM(sale_amount) OVER (
+        ORDER BY sale_date
+    ) AS cumulative_total
+FROM sales_data
+ORDER BY sale_date;
+
+-- 部署別の売上累計
+SELECT
+    department,
+    sale_date,
+    sale_amount,
+    SUM(sale_amount) OVER (
+        PARTITION BY department
+        ORDER BY sale_date
+    ) AS dept_cumulative
+FROM sales_data
+ORDER BY department, sale_date;
 ```
 
-**対処法：** エラーが出たら ROLLBACK してからやり直す。
-
-### ミス3：OFFSET の値が大きいクエリをそのまま本番に出す
+### 移動合計（直近N件の合計）
 
 ```sql
--- NG：OFFSET が大きいと非常に遅い
-SELECT * FROM articles ORDER BY published_at DESC LIMIT 20 OFFSET 500000;
+-- 直近3件の売上合計（スタッフ別）
+SELECT
+    staff_name,
+    sale_date,
+    sale_amount,
+    SUM(sale_amount) OVER (
+        PARTITION BY staff_name
+        ORDER BY sale_date
+        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW  -- 直近3行（2個前〜現在）
+    ) AS rolling_3_sum
+FROM sales_data
+ORDER BY staff_name, sale_date;
 ```
 
-**対処法：** EXPLAIN ANALYZE でパフォーマンスを確認し、カーソルベースへ移行する。
-
-### ミス4：カーソルページングで ORDER BY を忘れる
-
-```sql
--- NG：ORDER BY がないと毎回違う順番で返ってくる可能性がある
-SELECT id, title FROM articles WHERE id > 100 LIMIT 10;
-```
-
-**対処法：** カーソルページングでは必ず ORDER BY を付ける。
-
-```sql
--- OK
-SELECT id, title FROM articles WHERE id > 100 ORDER BY id ASC LIMIT 10;
-```
-
-### ミス5：長時間トランザクション内で API コールを行う
-
-```sql
--- NG（疑似コード）：トランザクション内で外部処理を行う
-BEGIN;
-UPDATE orders SET status = '処理中' WHERE id = 1;
-
--- ここで外部APIを呼び出す（数秒〜数十秒かかることもある）
--- → その間ずっとロックを保持し続ける！
-
-UPDATE orders SET status = '完了' WHERE id = 1;
-COMMIT;
-```
-
-**対処法：** 外部処理は BEGIN の外で行い、DB 操作だけをトランザクション内に収める。
+> **ポイント**  
+> `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW` は「2行前から現在行まで」を意味します。移動合計や移動平均の計算に使います。
 
 ---
 
-## 13. PRレビューのチェックポイント
+## 11. AVG OVER（移動平均）
 
-### トランザクション設計
+### 移動平均の計算
 
-- [ ] **トランザクション内で外部 API 呼び出しやファイル I/O などの副作用を行っていないか**
-  - ROLLBACK しても外部への影響は戻せない
-- [ ] **1 トランザクションの処理量が大きすぎないか（バッチ処理は分割しているか）**
-  - 長時間トランザクションはロックと VACUUM 妨害の原因になる
-- [ ] **トランザクション内でエラーが起きたときに ROLLBACK されているか**
-  - エラー後に COMMIT すると aborted state のまま操作することになる
+```sql
+-- 全期間の累計平均
+SELECT
+    sale_date,
+    sale_amount,
+    AVG(sale_amount) OVER (
+        ORDER BY sale_date
+    ) AS cumulative_avg
+FROM sales_data
+ORDER BY sale_date;
 
-### ページング
+-- 直近3件の移動平均
+SELECT
+    staff_name,
+    sale_date,
+    sale_amount,
+    ROUND(
+        AVG(sale_amount) OVER (
+            PARTITION BY staff_name
+            ORDER BY sale_date
+            ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+        )
+    ) AS moving_avg_3
+FROM sales_data
+ORDER BY staff_name, sale_date;
 
-- [ ] **OFFSET ページングを大量データに適用しようとしていないか**
-  - OFFSET が大きくなると全件スキャンが走り遅くなる
-  - 「次ページ」機能には id 基準のカーソルページングを推奨
-- [ ] **ページングに ORDER BY が付いているか**
-  - ORDER BY なしでは結果の順序が保証されず、ページをまたいで重複・欠落が起きる
-- [ ] **カーソルページングで使う列にインデックスがあるか**
-  - `WHERE id > :cursor ORDER BY id LIMIT n` の id 列にインデックスが必要
+-- 部署別の売上構成比（%）
+SELECT
+    staff_name,
+    department,
+    sale_amount,
+    ROUND(
+        100.0 * sale_amount / SUM(sale_amount) OVER (PARTITION BY department),
+        1
+    ) AS pct_of_dept
+FROM sales_data
+ORDER BY department, pct_of_dept DESC;
+```
+
+> **ポイント**  
+> `100.0 * sale_amount / SUM(sale_amount) OVER (PARTITION BY department)` で部署内の構成比（割合）を計算できます。GROUP BYを使わず、各行に割合が付くのがウィンドウ関数の強みです。
 
 ---
 
-## 14. まとめ
+## 12. ROWS / RANGE フレーム指定
+
+### フレームとは
+
+フレームとは「ウィンドウ内でどの行まで計算対象にするか」を細かく指定する仕組みです。
+
+```sql
+-- フレーム指定の構文
+OVER (
+    PARTITION BY ...
+    ORDER BY ...
+    ROWS BETWEEN [開始位置] AND [終了位置]
+    -- または
+    RANGE BETWEEN [開始位置] AND [終了位置]
+)
+```
+
+| フレーム位置 | 意味 |
+|------------|------|
+| `UNBOUNDED PRECEDING` | パーティションの先頭行 |
+| `N PRECEDING` | 現在行のN行前 |
+| `CURRENT ROW` | 現在の行 |
+| `N FOLLOWING` | 現在行のN行後 |
+| `UNBOUNDED FOLLOWING` | パーティションの最終行 |
+
+```sql
+-- 様々なフレーム指定の例
+SELECT
+    sale_date,
+    sale_amount,
+
+    -- 先頭から現在行までの累計
+    SUM(sale_amount) OVER (
+        ORDER BY sale_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS cumulative_sum,
+
+    -- 前1行・現在行・後1行の合計（中心移動合計）
+    SUM(sale_amount) OVER (
+        ORDER BY sale_date
+        ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+    ) AS centered_sum,
+
+    -- パーティション全体の合計
+    SUM(sale_amount) OVER (
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS total_sum
+
+FROM sales_data
+ORDER BY sale_date;
+```
+
+### ROWS vs RANGE
+
+```sql
+-- ROWS: 物理的な行数でフレームを決める
+-- RANGE: ORDER BY列の値の範囲でフレームを決める（同値は同じフレームに入る）
+
+-- 同日の売上が複数ある場合の違い
+SELECT
+    sale_date,
+    sale_amount,
+    SUM(sale_amount) OVER (ORDER BY sale_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rows_sum,
+    SUM(sale_amount) OVER (ORDER BY sale_date RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS range_sum
+FROM sales_data
+ORDER BY sale_date;
+-- 同じ日付が複数あると、RANGEはその日付の全行を同じフレームとして扱う
+```
+
+> **ポイント**  
+> 日時が重複しないデータなら `ROWS` と `RANGE` の結果は同じです。重複がある場合は `ROWS` の方が挙動が予測しやすいです。通常は `ROWS` を使いましょう。
+
+---
+
+## 13. よくあるミス
+
+### ミス1: WHERE句でウィンドウ関数の結果を直接フィルタしようとする
+
+```sql
+-- 悪い例: WHERE句でウィンドウ関数を使うとエラー
+-- SELECT staff_name, ROW_NUMBER() OVER (ORDER BY sale_amount DESC) AS rn
+-- FROM sales_data
+-- WHERE rn <= 3;  -- エラー! WHEREの時点ではウィンドウ関数未計算
+
+-- 正しい例: CTEかサブクエリを使う
+WITH ranked AS (
+    SELECT
+        staff_name,
+        sale_amount,
+        ROW_NUMBER() OVER (ORDER BY sale_amount DESC) AS rn
+    FROM sales_data
+)
+SELECT staff_name, sale_amount
+FROM ranked
+WHERE rn <= 3;
+```
+
+### ミス2: PARTITION BY なしで全体に適用される
+
+```sql
+-- 意図: 部署ごとの連番
+-- 間違い: PARTITION BY を忘れると全体で1つの連番になる
+SELECT
+    staff_name,
+    department,
+    -- 間違い（全体で連番）
+    ROW_NUMBER() OVER (ORDER BY sale_amount DESC) AS wrong_rn,
+    -- 正しい（部署ごとに連番）
+    ROW_NUMBER() OVER (PARTITION BY department ORDER BY sale_amount DESC) AS correct_rn
+FROM sales_data;
+```
+
+### ミス3: ORDER BY の向きを間違える
+
+```sql
+-- 累計の計算: ORDER BYの順序によって結果が変わる
+SELECT
+    sale_date,
+    sale_amount,
+    -- 日付昇順の累計（正しい：古い順に積み上げ）
+    SUM(sale_amount) OVER (ORDER BY sale_date ASC) AS asc_cumulative,
+    -- 日付降順の累計（新しい順に積み上げ）
+    SUM(sale_amount) OVER (ORDER BY sale_date DESC) AS desc_cumulative
+FROM sales_data
+ORDER BY sale_date;
+```
+
+### ミス4: GROUP BY と ウィンドウ関数を同時に使うときの注意
+
+```sql
+-- GROUP BY で集約した後にウィンドウ関数を使う場合
+-- ウィンドウ関数はGROUP BY後の結果に対して動作する
+SELECT
+    department,
+    SUM(sale_amount) AS dept_total,
+    -- 全部署合計に対する割合（GROUP BY後の行に対してウィンドウ関数が動く）
+    ROUND(
+        100.0 * SUM(sale_amount) / SUM(SUM(sale_amount)) OVER (),
+        1
+    ) AS pct_of_all
+FROM sales_data
+GROUP BY department;
+```
+
+> **注意**  
+> `SUM(SUM(sale_amount)) OVER ()` のように集計関数をネストして書くのは特殊な構文ですが、GROUP BY後の結果に対してウィンドウ関数を適用する有効な書き方です。
+
+---
+
+## 14. ポイント
+
+- **ROW_NUMBER / RANK の使い分けが要件と合っているか**
+  - 同率を同じ順位にしたいなら RANK / DENSE_RANK。一意な連番が必要なら ROW_NUMBER
+- **ウィンドウ関数の結果を WHERE 句で直接フィルタしようとしていないか**
+  - ウィンドウ関数は WHERE で使えない → CTE かサブクエリで囲んでから外側で絞る
+- **PARTITION BY の有無が要件（グループ内 vs 全体）と一致しているか**
+  - PARTITION BY なしは全行が1つのウィンドウ。意図して使っているかを確認
+- **LAG / LEAD で前後の行を参照するとき、ORDER BY が正しい列・方向になっているか**
+  - ORDER BY の列や DESC/ASC を間違えると前後関係が逆になる
+- **累計・移動平均で ROWS フレーム指定が適切か**
+  - `UNBOUNDED PRECEDING` と `CURRENT ROW` の組み合わせが意図通りか確認
+
+---
+
+## 15. まとめ
 
 | テーマ | 要点 |
 | --- | --- |
-| トランザクション | 複数 DML をひとまとめ。全部成功 or 全部失敗（ACID） |
-| BEGIN / COMMIT | トランザクション開始と確定 |
-| ROLLBACK | トランザクションの全変更を取り消す |
-| SAVEPOINT | トランザクション内の途中地点を保存。部分ロールバックが可能 |
-| オートコミット | BEGIN なしの DML は即座にコミット。PostgreSQL のデフォルト |
-| エラー時の挙動 | エラー後はトランザクションが aborted 状態に。ROLLBACK が必要 |
-| 長時間トランザクション | ロック保持・VACUUM 妨害のリスク。できるだけ短くする |
-| OFFSET ページング | シンプルだが大量データで遅い。データのズレも起きる |
-| カーソルベースページング | 前ページの最後の値を WHERE 条件に使う。常に速い |
-| 使い分け | 小規模・ページ番号ジャンプ必要 → OFFSET。大規模・SNS型 → カーソル |
-| よくあるミス | BEGIN 忘れ / エラー後 ROLLBACK 忘れ / 大きな OFFSET / ORDER BY 忘れ |
+| ウィンドウ関数とは | 行数を減らさず、各行に集計結果を付けて返す関数 |
+| GROUP BYとの違い | GROUP BYは行を集約（減る）、ウィンドウ関数は行が残る |
+| OVER句 | ウィンドウ（計算範囲）を指定する。PARTITION BY / ORDER BY / フレームを指定 |
+| PARTITION BY | グループ分け（GROUP BYと似ているが行は減らない）|
+| ROW_NUMBER | 重複なしの連番。同値でも別の番号 |
+| RANK | 同値に同じ順位、飛び番あり（1,1,3）|
+| DENSE_RANK | 同値に同じ順位、飛び番なし（1,1,2）|
+| LAG / LEAD | 前/後の行の値を参照。前月比・翌日比に使う |
+| SUM OVER | 累計・移動合計。ORDER BYとフレームで範囲を制御 |
+| AVG OVER | 移動平均・累計平均。グラフの平滑化に使う |
+| ROWSフレーム | `ROWS BETWEEN N PRECEDING AND M FOLLOWING` で範囲指定 |
+| よくあるミス | WHERE句での直接フィルタ不可・PARTITION BY忘れ |
+
+---
+
+## 練習問題
+
+以下のテーブルを使って解いてください。
+
+```sql
+CREATE TABLE IF NOT EXISTS sales_data (
+  id          INTEGER PRIMARY KEY,
+  staff_name  TEXT    NOT NULL,
+  department  TEXT    NOT NULL,
+  sale_amount INTEGER NOT NULL,
+  sale_date   DATE    NOT NULL
+);
+DELETE FROM sales_data;
+INSERT INTO sales_data (id, staff_name, department, sale_amount, sale_date) VALUES
+  (1, '田中', '営業1課',  85000, '2024-01-10'),
+  (2, '鈴木', '営業1課', 120000, '2024-01-15'),
+  (3, '佐藤', '営業2課',  95000, '2024-01-20'),
+  (4, '田中', '営業1課',  60000, '2024-02-01'),
+  (5, '鈴木', '営業1課',  40000, '2024-02-10'),
+  (6, '山田', '営業2課', 110000, '2024-02-15'),
+  (7, '佐藤', '営業2課',  75000, '2024-02-20');
+```
+
+### 問題1: 部署別合計と全体合計を同時に取得
+
+> 参照：[3. PARTITION BY](#3-partition-byグループ分けgroup-byとの違い) ・ [10. SUM OVER](#10-sum-over累計・移動合計)
+
+各行に「自分の部署の合計売上」と「全体の合計売上」を並べて表示してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT
+  staff_name,
+  department,
+  sale_amount,
+  SUM(sale_amount) OVER (PARTITION BY department) AS dept_total,
+  SUM(sale_amount) OVER ()                         AS grand_total
+FROM sales_data;
+```
+
+**解説：** `PARTITION BY department` で部署ごとの合計、`OVER ()` でウィンドウ全体の合計を計算します。GROUP BY と異なり元の行数を保ちながら集計値を付け加えられます。個々のレコードの部署内シェア（`sale_amount / dept_total`）などの計算に便利です。
+
+</details>
+
+### 問題2: 3件移動平均
+
+> 参照：[12. ROWS / RANGE フレーム指定](#12-rows-range-フレーム指定)
+
+`sale_date` 順で、直前2件と現在行の3件移動平均を計算してください。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+SELECT
+  sale_date,
+  staff_name,
+  sale_amount,
+  AVG(sale_amount) OVER (
+    ORDER BY sale_date
+    ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+  ) AS moving_avg_3
+FROM sales_data
+ORDER BY sale_date;
+```
+
+**解説：** `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW` は「現在行を含む直前2行」のフレームを指定します。先頭付近は対象行数が少ないため、1行目は1件平均、2行目は2件平均になります。データの平滑化（グラフのノイズ除去）に使われるパターンです。
+
+</details>
+
+### 問題3: 部署内トップの売上のみ抽出
+
+> 参照：[5. ROW_NUMBER](#5-rownumber一意な連番) ・ [2. OVER句の基本](#2-over句の基本パーティションとオーダー)
+
+各部署で `sale_amount` が最も高い行だけを取得してください（ウィンドウ関数と CTE を組み合わせて）。
+
+<details>
+<summary>回答を見る</summary>
+
+```sql
+WITH ranked AS (
+  SELECT
+    staff_name,
+    department,
+    sale_amount,
+    ROW_NUMBER() OVER (
+      PARTITION BY department
+      ORDER BY sale_amount DESC
+    ) AS rn
+  FROM sales_data
+)
+SELECT staff_name, department, sale_amount
+FROM ranked
+WHERE rn = 1;
+```
+
+**解説：** ウィンドウ関数は WHERE 句に直接使えないため、CTE または サブクエリで先に順位を付けてから外側で絞ります。`ROW_NUMBER()` を使うと同額でも1行だけ選べます（`RANK()` だと同額が複数返ります）。これは「グループ内の最新1件を取る」などの現場頻出パターンです。
+
+</details>
