@@ -10,6 +10,32 @@ const courseImageModules = import.meta.glob("../course/**/images/*", {
   import: "default",
 }) as Record<string, string>;
 
+const slugify = (text: string): string => {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\u3040-\u309f\u30a0-\u30ff\u3400-\u9fff\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+};
+
+const headingWithId =
+  (Tag: "h2" | "h3") =>
+  ({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement>) => {
+    const text =
+      typeof children === "string"
+        ? children
+        : Array.isArray(children)
+          ? children.map((c) => (typeof c === "string" ? c : "")).join("")
+          : "";
+    const id = slugify(text);
+    return (
+      <Tag id={id} {...props}>
+        {children}
+      </Tag>
+    );
+  };
+
 const splitMarkdownByH2 = (markdown: string) => {
   const lines = markdown.split("\n");
   const introLines: string[] = [];
@@ -55,6 +81,7 @@ const COURSES_WITH_GOAL_CARD_LAYOUT = [
   "react",
   "git",
   "db",
+  "sql",
 ] as const;
 
 // Sidebar用のデータ
@@ -116,26 +143,39 @@ const courseLessons: Record<string, { title: string; url: string }[]> = {
     { title: "14. ポートフォリオ・QA", url: "/course/react/lesson14" },
   ],
   db: [
-    { title: "1. オリエンテーション（学習計画）", url: "/course/db/lesson1" },
-    { title: "2. 環境構築（A5:SQL Mk-2・PostgreSQL）", url: "/course/db/lesson2" },
-    { title: "3. RDBMSの概念", url: "/course/db/lesson3" },
-    { title: "4. トランザクションとACID", url: "/course/db/lesson4" },
-    { title: "5. SELECT/WHERE/ORDER/LIMIT・ページング", url: "/course/db/lesson5" },
-    { title: "6. NULLの扱い", url: "/course/db/lesson6" },
-    { title: "7. 条件検索（LIKE/IN/EXISTS/BETWEEN）", url: "/course/db/lesson7" },
-    { title: "8. 日付・時刻と型変換", url: "/course/db/lesson8" },
-    { title: "9. GROUP BY・HAVING", url: "/course/db/lesson9" },
-    { title: "10. INNER JOIN・LEFT JOIN", url: "/course/db/lesson10" },
-    { title: "11. ER図の基本記法", url: "/course/db/lesson11" },
-    { title: "12. 正規化と多対多", url: "/course/db/lesson12" },
-    { title: "13. 履歴・論理削除・物理削除", url: "/course/db/lesson13" },
-    { title: "14. テーブル定義書", url: "/course/db/lesson14" },
-    { title: "15. インデックス設計", url: "/course/db/lesson15" },
-    { title: "16. INSERT/UPDATE/DELETEと安全運用", url: "/course/db/lesson16" },
-    { title: "17. EXPLAINとチューニング", url: "/course/db/lesson17" },
-    { title: "18. 運用（ANALYZE/VACUUM・移行・バックアップ）", url: "/course/db/lesson18" },
-    { title: "19. セキュリティと権限", url: "/course/db/lesson19" },
-    { title: "20. 総合演習", url: "/course/db/lesson20" },
+    { title: "1. データベースとRDBMSの仕組み", url: "/course/db/lesson1" },
+    { title: "2. 環境構築", url: "/course/db/lesson2" },
+    { title: "3. 主キーと外部キー", url: "/course/db/lesson3" },
+    { title: "4. データ型の選び方とPK設計", url: "/course/db/lesson4" },
+    { title: "5. 制約", url: "/course/db/lesson5" },
+    { title: "6. テーブル定義", url: "/course/db/lesson6" },
+    { title: "7. ERDの読み書き", url: "/course/db/lesson7" },
+    { title: "8. 正規化", url: "/course/db/lesson8" },
+    { title: "9. 多対多と中間テーブル", url: "/course/db/lesson9" },
+    { title: "10. 設計パターン（履歴・論理削除・物理削除）", url: "/course/db/lesson10" },
+    { title: "11. インデックスの仕組みと設計", url: "/course/db/lesson11" },
+    { title: "12. トランザクションとロック", url: "/course/db/lesson12" },
+    { title: "13. EXPLAINとパフォーマンス", url: "/course/db/lesson13" },
+    { title: "14. 運用", url: "/course/db/lesson14" },
+    { title: "15. セキュリティと権限", url: "/course/db/lesson15" },
+  ],
+  sql: [
+    { title: "1. SELECT と WHERE", url: "/course/sql/lesson1" },
+    { title: "2. ORDER BY / LIMIT / DISTINCT", url: "/course/sql/lesson2" },
+    { title: "3. NULL と CASE式", url: "/course/sql/lesson3" },
+    { title: "4. 文字列検索パターン", url: "/course/sql/lesson4" },
+    { title: "5. 関数と型変換", url: "/course/sql/lesson5" },
+    { title: "6. INSERT と UPSERT", url: "/course/sql/lesson6" },
+    { title: "7. UPDATE と DELETE", url: "/course/sql/lesson7" },
+    { title: "8. トランザクションとページング", url: "/course/sql/lesson8" },
+    { title: "9. 集計関数", url: "/course/sql/lesson9" },
+    { title: "10. GROUP BY と HAVING", url: "/course/sql/lesson10" },
+    { title: "11. JOINの基本", url: "/course/sql/lesson11" },
+    { title: "12. JOIN応用", url: "/course/sql/lesson12" },
+    { title: "13. サブクエリ", url: "/course/sql/lesson13" },
+    { title: "14. CTE（WITH句）", url: "/course/sql/lesson14" },
+    { title: "15. VIEW", url: "/course/sql/lesson15" },
+    { title: "16. ウィンドウ関数", url: "/course/sql/lesson16" },
   ],
   java: [
     { title: "1. Java言語とは", url: "/course/java/lesson1" },
@@ -207,6 +247,8 @@ const Textbook = () => {
                     remarkPlugins={[remarkGfm]}
                     rehypePlugins={[rehypeRaw]}
                     components={{
+                      h2: headingWithId("h2"),
+                      h3: headingWithId("h3"),
                       table: ({ children }) => (
                         <div className="my-5 overflow-x-auto rounded-lg border border-slate-200 bg-white">
                           <table className="min-w-[720px]">{children}</table>
@@ -231,6 +273,8 @@ const Textbook = () => {
               remarkPlugins={[remarkGfm]}
               rehypePlugins={[rehypeRaw]}
               components={{
+                h2: headingWithId("h2"),
+                h3: headingWithId("h3"),
                 table: ({ children }) => (
                   <div className="my-6 overflow-x-auto rounded-lg border border-slate-200 bg-white">
                     <table className="min-w-[720px]">{children}</table>
